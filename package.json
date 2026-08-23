@@ -1,0 +1,17 @@
+{
+  "name": "despacho-backend",
+  "version": "1.0.0",
+  "description": "API do app Despacho — cadastro de comércio e motoboy, corridas e fila de oferta",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "uuid": "^9.0.1"
+  }
+}
