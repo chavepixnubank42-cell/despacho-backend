@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcryptjs');
+const { MercadoPagoConfig, Payment } = require('mercadopago');
 const { loadDB, saveDB } = require('./db');
 
 const app = express();
@@ -9,277 +11,297 @@ app.use(express.json());
 
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
+const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
 const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
+
+// ---------------------------------------------------------------
+// Mercado Pago (Pix) — set MERCADOPAGO_ACCESS_TOKEN as an environment
+// variable on your host (Railway: Variables tab). Without it, credit
+// top-ups are disabled but the rest of the app keeps working.
+// ---------------------------------------------------------------
+const mpToken = process.env.MERCADOPAGO_ACCESS_TOKEN || '';
+const mpClient = mpToken ? new MercadoPagoConfig({ accessToken: mpToken, options: { timeout: 8000 } }) : null;
+const mpPayment = mpClient ? new Payment(mpClient) : null;
+
+// ---------------------------------------------------------------
+// Geocoding (Nominatim/OpenStreetMap) — turns an address into lat/lng so
+// we can later check how far the motoboy really is from it.
+// ---------------------------------------------------------------
+
+// Nominatim's usage policy caps public requests at ~1/second, so we queue
+// them and only ever have one in flight, spaced a second apart.
+let geocodeChain = Promise.resolve();
+function throttledFetch(url, options) {
+  const run = geocodeChain.then(async () => {
+    const res = await fetch(url, options);
+    await new Promise((r) => setTimeout(r, 1000)); // hold the slot for 1s
+    return res;
+  });
+  geocodeChain = run.catch(() => {}); // never let one failure jam the queue
+  return run;
+}
+
+async function geocodeAddress(address) {
+  if (!address) return null;
+  const key = address.trim().toLowerCase();
+  const db = loadDB();
+  db.geocodeCache = db.geocodeCache || {};
+  if (db.geocodeCache[key] !== undefined) return db.geocodeCache[key];
+
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(address);
+    const res = await throttledFetch(url, {
+      headers: { 'User-Agent': 'DespachoApp/1.0 (app de despacho de entregas por moto)' }
+    });
+    const data = await res.json();
+    const coords = data && data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null;
+    const db2 = loadDB();
+    db2.geocodeCache = db2.geocodeCache || {};
+    db2.geocodeCache[key] = coords; // cache the miss too, so we don't retry a bad address every time
+    saveDB(db2);
+    return coords;
+  } catch (e) {
+    console.error('Geocoding falhou para', address, e.message);
+    return null;
+  }
+}
+
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ---------------------------------------------------------------
+// Auth — hashed passwords (bcryptjs) + server-side session tokens.
+// Never store or return a plain-text password; never return passwordHash.
+// ---------------------------------------------------------------
+function sanitizeBusiness(b) {
+  if (!b) return b;
+  const { passwordHash, ...rest } = b;
+  return rest;
+}
+function sanitizeMotoboy(m) {
+  if (!m) return m;
+  const { passwordHash, ...rest } = m;
+  return rest;
+}
+function makeToken() {
+  return uuidv4().replace(/-/g, '') + uuidv4().replace(/-/g, '');
+}
+function createSession(db, type, id) {
+  db.sessions = db.sessions || {};
+  const token = makeToken();
+  db.sessions[token] = { type, id, createdAt: Date.now() };
+  return token;
+}
+// Protects a route: only requests with a valid session token of one of the
+// given types get through. req.authType / req.authId are set for the handler.
+function requireAuth(...allowedTypes) {
+  return (req, res, next) => {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Não autenticado — faça login novamente' });
+    const db = loadDB();
+    db.sessions = db.sessions || {};
+    const session = db.sessions[token];
+    if (!session || (allowedTypes.length && !allowedTypes.includes(session.type))) {
+      return res.status(401).json({ error: 'Sessão inválida — faça login novamente' });
+    }
+    req.authType = session.type;
+    req.authId = session.id;
+    next();
+  };
+}
+const PASSWORD_MIN_LENGTH = 6;
 
 // ---------------------------------------------------------------
 // Businesses
 // ---------------------------------------------------------------
-app.post('/api/businesses', (req, res) => {
-  const { name, phone, address } = req.body || {};
-  if (!name || !phone || !address) {
-    return res.status(400).json({ error: 'Preencha nome, telefone e endereço' });
+app.post('/api/businesses', async (req, res) => {
+  const { name, phone, email, password, confirmPassword, address } = req.body || {};
+  if (!name || !phone || !email || !password || !address) {
+    return res.status(400).json({ error: 'Preencha todos os campos' });
+  }
+  if (password !== confirmPassword) {
+    return res.status(400).json({ error: 'As senhas não coincidem' });
+  }
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` });
   }
   const db = loadDB();
-  const business = { id: shortId('biz'), name, phone, address, createdAt: Date.now() };
+  const emailLower = email.trim().toLowerCase();
+  const emailTaken = Object.values(db.businesses).some((b) => (b.email || '').toLowerCase() === emailLower);
+  if (emailTaken) return res.status(409).json({ error: 'Já existe uma conta de comércio com esse e-mail' });
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const business = {
+    id: shortId('biz'),
+    name,
+    phone,
+    email: emailLower,
+    passwordHash,
+    address,
+    credits: 0,
+    createdAt: Date.now()
+  };
   db.businesses[business.id] = business;
+  const token = createSession(db, 'business', business.id);
   saveDB(db);
-  res.json(business);
+  res.json({ token, business: sanitizeBusiness(business) });
+});
+
+app.post('/api/businesses/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Informe e-mail e senha' });
+  const db = loadDB();
+  const emailLower = email.trim().toLowerCase();
+  const business = Object.values(db.businesses).find((b) => (b.email || '').toLowerCase() === emailLower);
+  if (!business || !business.passwordHash) {
+    return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  }
+  const ok = await bcrypt.compare(password, business.passwordHash);
+  if (!ok) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  const token = createSession(db, 'business', business.id);
+  saveDB(db);
+  res.json({ token, business: sanitizeBusiness(business) });
+});
+
+// Migration path for businesses that registered before login existed —
+// identified by phone (since that's all the old records have), then they
+// set their own email + password to finish becoming a real account.
+app.post('/api/businesses/complete-profile', async (req, res) => {
+  const { phone, email, password, confirmPassword } = req.body || {};
+  if (!phone || !email || !password) return res.status(400).json({ error: 'Preencha todos os campos' });
+  if (password !== confirmPassword) return res.status(400).json({ error: 'As senhas não coincidem' });
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` });
+  }
+  const db = loadDB();
+  const business = Object.values(db.businesses).find((b) => b.phone === phone.trim());
+  if (!business) return res.status(404).json({ error: 'Não encontramos um comércio com esse telefone' });
+  if (business.passwordHash) {
+    return res.status(409).json({ error: 'Essa conta já tem senha — use a tela de entrar' });
+  }
+  const emailLower = email.trim().toLowerCase();
+  const emailTaken = Object.values(db.businesses).some(
+    (b) => b.id !== business.id && (b.email || '').toLowerCase() === emailLower
+  );
+  if (emailTaken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+  business.email = emailLower;
+  business.passwordHash = await bcrypt.hash(password, 10);
+  const token = createSession(db, 'business', business.id);
+  saveDB(db);
+  res.json({ token, business: sanitizeBusiness(business) });
 });
 
 app.get('/api/businesses', (req, res) => {
-  res.json(Object.values(loadDB().businesses));
+  res.json(Object.values(loadDB().businesses).map(sanitizeBusiness));
 });
 
 app.get('/api/businesses/:id', (req, res) => {
   const b = loadDB().businesses[req.params.id];
   if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
-  res.json(b);
+  res.json(sanitizeBusiness(b));
 });
 
 // ---------------------------------------------------------------
 // Motoboys
 // ---------------------------------------------------------------
-app.post('/api/motoboys', (req, res) => {
-  const { name, phone, vehicle } = req.body || {};
-  if (!name || !phone || !vehicle) {
-    return res.status(400).json({ error: 'Preencha nome, telefone e moto/placa' });
+app.post('/api/motoboys', async (req, res) => {
+  const { name, phone, email, password, confirmPassword, vehicle } = req.body || {};
+  if (!name || !phone || !email || !password || !vehicle) {
+    return res.status(400).json({ error: 'Preencha todos os campos' });
+  }
+  if (password !== confirmPassword) {
+    return res.status(400).json({ error: 'As senhas não coincidem' });
+  }
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` });
   }
   const db = loadDB();
-  const motoboy = { id: shortId('moto'), name, phone, vehicle, online: false, createdAt: Date.now() };
+  const emailLower = email.trim().toLowerCase();
+  const emailTaken = Object.values(db.motoboys).some((m) => (m.email || '').toLowerCase() === emailLower);
+  if (emailTaken) return res.status(409).json({ error: 'Já existe uma conta de motoboy com esse e-mail' });
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const motoboy = {
+    id: shortId('moto'),
+    name,
+    phone,
+    email: emailLower,
+    passwordHash,
+    vehicle,
+    online: false,
+    createdAt: Date.now()
+  };
   db.motoboys[motoboy.id] = motoboy;
+  const token = createSession(db, 'motoboy', motoboy.id);
   saveDB(db);
-  res.json(motoboy);
+  res.json({ token, motoboy: sanitizeMotoboy(motoboy) });
+});
+
+app.post('/api/motoboys/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Informe e-mail e senha' });
+  const db = loadDB();
+  const emailLower = email.trim().toLowerCase();
+  const motoboy = Object.values(db.motoboys).find((m) => (m.email || '').toLowerCase() === emailLower);
+  if (!motoboy || !motoboy.passwordHash) {
+    return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  }
+  const ok = await bcrypt.compare(password, motoboy.passwordHash);
+  if (!ok) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  const token = createSession(db, 'motoboy', motoboy.id);
+  saveDB(db);
+  res.json({ token, motoboy: sanitizeMotoboy(motoboy) });
+});
+
+// Migration path for motoboys that registered before login existed.
+app.post('/api/motoboys/complete-profile', async (req, res) => {
+  const { phone, email, password, confirmPassword } = req.body || {};
+  if (!phone || !email || !password) return res.status(400).json({ error: 'Preencha todos os campos' });
+  if (password !== confirmPassword) return res.status(400).json({ error: 'As senhas não coincidem' });
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` });
+  }
+  const db = loadDB();
+  const motoboy = Object.values(db.motoboys).find((m) => m.phone === phone.trim());
+  if (!motoboy) return res.status(404).json({ error: 'Não encontramos um motoboy com esse telefone' });
+  if (motoboy.passwordHash) {
+    return res.status(409).json({ error: 'Essa conta já tem senha — use a tela de entrar' });
+  }
+  const emailLower = email.trim().toLowerCase();
+  const emailTaken = Object.values(db.motoboys).some(
+    (m) => m.id !== motoboy.id && (m.email || '').toLowerCase() === emailLower
+  );
+  if (emailTaken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+  motoboy.email = emailLower;
+  motoboy.passwordHash = await bcrypt.hash(password, 10);
+  const token = createSession(db, 'motoboy', motoboy.id);
+  saveDB(db);
+  res.json({ token, motoboy: sanitizeMotoboy(motoboy) });
 });
 
 app.get('/api/motoboys', (req, res) => {
-  res.json(Object.values(loadDB().motoboys));
+  res.json(Object.values(loadDB().motoboys).map(sanitizeMotoboy));
 });
 
 app.get('/api/motoboys/:id', (req, res) => {
   const m = loadDB().motoboys[req.params.id];
   if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
-  res.json(m);
+  res.json(sanitizeMotoboy(m));
 });
 
-// Used for the online/offline toggle.
-app.patch('/api/motoboys/:id', (req, res) => {
+// Used for the online/offline toggle. Only the motoboy themself can flip it.
+app.patch('/api/motoboys/:id', requireAuth('motoboy'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
   const db = loadDB();
   const m = db.motoboys[req.params.id];
   if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
   if (typeof req.body.online === 'boolean') m.online = req.body.online;
   saveDB(db);
-  res.json(m);
-});
-
-// ---------------------------------------------------------------
-// Orders
-// ---------------------------------------------------------------
-function rideCount(db, motoboyId) {
-  return Object.values(db.orders).filter(
-    (o) => o.motoboyId === motoboyId && (o.status === 'entregue' || ACTIVE_STATUSES.includes(o.status))
-  ).length;
-}
-
-// Who gets offered the ride first: only online + free motoboys, ordered by
-// whoever has done the fewest rides so far (spreads the work around).
-// If you later add geocoded addresses, sort by distance here instead.
-function buildOfferQueue(db) {
-  const candidates = Object.values(db.motoboys).filter((m) => {
-    if (!m.online) return false;
-    const busy = Object.values(db.orders).some(
-      (o) => o.motoboyId === m.id && ACTIVE_STATUSES.includes(o.status)
-    );
-    return !busy;
-  });
-  candidates.sort((a, b) => rideCount(db, a.id) - rideCount(db, b.id));
-  return candidates.map((m) => m.id);
-}
-
-function isOfferedTo(o, motoboyId) {
-  if (o.status !== 'pendente') return false;
-  if (o.declinedBy && o.declinedBy.includes(motoboyId)) return false;
-  if (!o.offerQueue || o.offerQueue.length === 0) return true; // nobody was online — open to anyone
-  if (o.offerIndex >= o.offerQueue.length) return true; // everyone passed — open to anyone left
-  return o.offerQueue[o.offerIndex] === motoboyId;
-}
-
-app.post('/api/orders', (req, res) => {
-  const { businessId, pickupAddress, deliveryAddress, value, note } = req.body || {};
-  const db = loadDB();
-  const business = db.businesses[businessId];
-  if (!business) return res.status(404).json({ error: 'Comércio não encontrado' });
-  if (!pickupAddress || !deliveryAddress || !value) {
-    return res.status(400).json({ error: 'Preencha os endereços e o valor' });
-  }
-  const offerQueue = buildOfferQueue(db);
-  const order = {
-    id: shortId('ord'),
-    businessId,
-    businessName: business.name,
-    businessPhone: business.phone,
-    pickupAddress,
-    deliveryAddress,
-    value: parseFloat(value) || 0,
-    note: note || '',
-    status: 'pendente',
-    motoboyId: null,
-    motoboyName: null,
-    motoboyPhone: null,
-    offerQueue,
-    offerIndex: 0,
-    offeredAt: offerQueue.length > 0 ? Date.now() : null,
-    declinedBy: [],
-    createdAt: Date.now(),
-    acceptedAt: null,
-    arrivedPickupAt: null,
-    departedAt: null,
-    arrivedDeliveryAt: null,
-    deliveredAt: null,
-    cancelledAt: null
-  };
-  db.orders[order.id] = order;
-  saveDB(db);
-  res.json(order);
-});
-
-// All orders, optionally filtered by ?businessId= or ?motoboyId=
-app.get('/api/orders', (req, res) => {
-  let orders = Object.values(loadDB().orders);
-  if (req.query.businessId) orders = orders.filter((o) => o.businessId === req.query.businessId);
-  if (req.query.motoboyId) orders = orders.filter((o) => o.motoboyId === req.query.motoboyId);
-  orders.sort((a, b) => b.createdAt - a.createdAt);
-  res.json(orders);
-});
-
-// Orders currently visible/offered to one specific motoboy — this is what
-// the "Disponíveis" tab should call instead of filtering the full list
-// client-side, so a motoboy never even receives orders that aren't theirs yet.
-app.get('/api/orders/available/:motoboyId', (req, res) => {
-  const list = Object.values(loadDB().orders).filter((o) => isOfferedTo(o, req.params.motoboyId));
-  list.sort((a, b) => a.createdAt - b.createdAt);
-  res.json(list);
-});
-
-app.get('/api/orders/:id', (req, res) => {
-  const o = loadDB().orders[req.params.id];
-  if (!o) return res.status(404).json({ error: 'Corrida não encontrada' });
-  res.json(o);
-});
-
-app.post('/api/orders/:id/accept', (req, res) => {
-  const { motoboyId } = req.body || {};
-  const db = loadDB();
-  const o = db.orders[req.params.id];
-  const m = db.motoboys[motoboyId];
-  if (!o || !m) return res.status(404).json({ error: 'Não encontrado' });
-  const alreadyActive = Object.values(db.orders).some(
-    (x) => x.motoboyId === motoboyId && ACTIVE_STATUSES.includes(x.status)
-  );
-  if (alreadyActive) return res.status(409).json({ error: 'Você já tem uma corrida em andamento' });
-  if (o.status !== 'pendente') return res.status(409).json({ error: 'Corrida não está mais disponível' });
-  if (!isOfferedTo(o, motoboyId)) {
-    return res.status(409).json({ error: 'Corrida está sendo oferecida a outro motoboy no momento' });
-  }
-  o.status = 'aceito';
-  o.motoboyId = motoboyId;
-  o.motoboyName = m.name;
-  o.motoboyPhone = m.phone;
-  o.acceptedAt = Date.now();
-  saveDB(db);
-  res.json(o);
-});
-
-app.post('/api/orders/:id/decline', (req, res) => {
-  const { motoboyId } = req.body || {};
-  const db = loadDB();
-  const o = db.orders[req.params.id];
-  if (!o) return res.status(404).json({ error: 'Não encontrado' });
-  if (o.status !== 'pendente') return res.json(o);
-  o.declinedBy = Array.from(new Set([...(o.declinedBy || []), motoboyId]));
-  if (o.offerQueue && o.offerQueue[o.offerIndex] === motoboyId) {
-    o.offerIndex += 1;
-    o.offeredAt = Date.now();
-  }
-  saveDB(db);
-  res.json(o);
-});
-
-// One helper for the four straight-line stage transitions.
-function stageTransition(fromStatus, toStatus, extraFields) {
-  return (req, res) => {
-    const db = loadDB();
-    const o = db.orders[req.params.id];
-    if (!o) return res.status(404).json({ error: 'Não encontrado' });
-    if (o.status !== fromStatus) {
-      return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
-    }
-    Object.assign(o, extraFields(req.body || {}));
-    o.status = toStatus;
-    saveDB(db);
-    res.json(o);
-  };
-}
-
-app.post(
-  '/api/orders/:id/arrive-pickup',
-  stageTransition('aceito', 'no_local_retirada', (body) => ({
-    arrivedPickupAt: Date.now(),
-    arrivedPickupGeo: body.geo || null
-  }))
-);
-app.post(
-  '/api/orders/:id/depart',
-  stageTransition('no_local_retirada', 'em_entrega', () => ({ departedAt: Date.now() }))
-);
-app.post(
-  '/api/orders/:id/arrive-delivery',
-  stageTransition('em_entrega', 'no_local_entrega', (body) => ({
-    arrivedDeliveryAt: Date.now(),
-    arrivedDeliveryGeo: body.geo || null
-  }))
-);
-app.post(
-  '/api/orders/:id/deliver',
-  stageTransition('no_local_entrega', 'entregue', () => ({ deliveredAt: Date.now() }))
-);
-
-app.post('/api/orders/:id/cancel', (req, res) => {
-  const db = loadDB();
-  const o = db.orders[req.params.id];
-  if (!o) return res.status(404).json({ error: 'Não encontrado' });
-  o.status = 'cancelado';
-  o.cancelledAt = Date.now();
-  saveDB(db);
-  res.json(o);
-});
-
-// ---------------------------------------------------------------
-// Background job — advances any offer that timed out without a response.
-// Runs on the server itself, so it works even if every phone is asleep.
-// ---------------------------------------------------------------
-setInterval(() => {
-  const db = loadDB();
-  let changed = false;
-  Object.values(db.orders).forEach((o) => {
-    if (
-      o.status === 'pendente' &&
-      o.offerQueue &&
-      o.offerQueue.length > 0 &&
-      o.offerIndex < o.offerQueue.length &&
-      o.offeredAt &&
-      Date.now() - o.offeredAt > OFFER_TIMEOUT_MS
-    ) {
-      const skipped = o.offerQueue[o.offerIndex];
-      o.declinedBy = Array.from(new Set([...(o.declinedBy || []), skipped]));
-      o.offerIndex += 1;
-      o.offeredAt = Date.now();
-      changed = true;
-    }
-  });
-  if (changed) saveDB(db);
-}, 5000);
-
-app.get('/', (req, res) => res.send('Despacho API rodando ✅'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Despacho API na porta ' + PORT));
