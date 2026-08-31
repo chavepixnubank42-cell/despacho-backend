@@ -345,6 +345,34 @@ app.post('/api/logout', (req, res) => {
 });
 
 // ---------------------------------------------------------------
+// Financial transactions ledger — every credit and debit to a business's
+// balance gets a record here, so the extrato shows the full history.
+// ---------------------------------------------------------------
+function addTransaction(db, businessId, type, amount, description, orderId) {
+  db.transactions = db.transactions || {};
+  const id = shortId('txn');
+  db.transactions[id] = {
+    id,
+    businessId,
+    type, // 'credito' | 'debito'
+    amount,
+    description,
+    orderId: orderId || null,
+    createdAt: Date.now()
+  };
+  return db.transactions[id];
+}
+
+app.get('/api/businesses/:id/transactions', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  db.transactions = db.transactions || {};
+  const list = Object.values(db.transactions).filter((t) => t.businessId === req.params.id);
+  list.sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list);
+});
+
+// ---------------------------------------------------------------
 // Credits (Pix top-up via Mercado Pago)
 // ---------------------------------------------------------------
 
@@ -358,6 +386,7 @@ function creditIfNewlyApproved(db, paymentRecord, mpStatus) {
     if (business) {
       business.credits = (business.credits || 0) + paymentRecord.amount;
       paymentRecord.credited = true;
+      addTransaction(db, business.id, 'credito', paymentRecord.amount, 'Recarga via Pix');
     }
   }
 }
@@ -549,6 +578,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   }
   freshBusiness.credits -= rideValue;
   freshDb.orders[order.id] = order;
+  addTransaction(freshDb, businessId, 'debito', rideValue, 'Entrega #' + order.id.slice(-6).toUpperCase(), order.id);
   saveDB(freshDb);
   res.json(order);
 });
@@ -715,13 +745,21 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
   const isOwner = req.authType === 'business' && o.businessId === req.authId;
   const isAssignedMotoboy = req.authType === 'motoboy' && o.motoboyId === req.authId;
   if (!isOwner && !isAssignedMotoboy) return res.status(403).json({ error: 'Você não pode cancelar essa corrida' });
+  const { reason, note } = req.body || {};
+  if (!reason) return res.status(400).json({ error: 'Selecione um motivo para o cancelamento' });
   if (o.creditsCharged) {
     const business = db.businesses[o.businessId];
-    if (business) business.credits = (business.credits || 0) + o.value;
+    if (business) {
+      business.credits = (business.credits || 0) + o.value;
+      addTransaction(db, o.businessId, 'credito', o.value, 'Estorno — Entrega #' + o.id.slice(-6).toUpperCase() + ' cancelada', o.id);
+    }
     o.creditsCharged = false;
   }
   o.status = 'cancelado';
   o.cancelledAt = Date.now();
+  o.cancelledBy = req.authType; // 'business' | 'motoboy'
+  o.cancelReason = reason;
+  o.cancelNote = note || null;
   saveDB(db);
   res.json(o);
 });
