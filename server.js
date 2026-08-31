@@ -439,8 +439,13 @@ app.post('/api/businesses/:id/topup', requireAuth('business'), async (req, res) 
       qrCode: txData.qr_code || null
     });
   } catch (e) {
-    console.error('Erro ao criar pagamento Pix:', e.message);
-    res.status(502).json({ error: 'Não consegui gerar o Pix — tente novamente em instantes.' });
+    // Surface the real reason from Mercado Pago instead of a generic
+    // message — the SDK usually puts the actual API error in e.cause.
+    const detail = (e.cause && e.cause[0] && (e.cause[0].description || e.cause[0].message))
+      || e.message
+      || 'erro desconhecido';
+    console.error('Erro ao criar pagamento Pix:', detail, JSON.stringify(e.cause || ''));
+    res.status(502).json({ error: 'Não consegui gerar o Pix: ' + detail });
   }
 });
 
