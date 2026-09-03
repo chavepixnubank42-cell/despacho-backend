@@ -8,7 +8,25 @@ const { loadDB, saveDB } = require('./db');
 const app = express();
 app.use(cors());
 app.use(express.json());
+const express = require('express');
+const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcryptjs');
+const { MercadoPagoConfig, Payment } = require('mercadopago');
+const { loadDB, saveDB } = require('./db');
 
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
+const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
 const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
