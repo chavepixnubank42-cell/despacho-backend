@@ -8,12 +8,7 @@ const { loadDB, saveDB } = require('./db');
 const app = express();
 app.use(cors());
 app.use(express.json());
-const express = require('express');
-const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
-const bcrypt = require('bcryptjs');
-const { MercadoPagoConfig, Payment } = require('mercadopago');
-const { loadDB, saveDB } = require('./db');
+
 
 const app = express();
 app.use(cors());
