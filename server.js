@@ -313,7 +313,21 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), (req, res) => {
   const db = loadDB();
   const m = db.motoboys[req.params.id];
   if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
-  if (typeof req.body.online === 'boolean') m.online = req.body.online;
+
+  if (typeof req.body.online === 'boolean') {
+    m.online = req.body.online;
+    m.status = m.online ? 'online' : 'offline';
+  }
+
+  if (typeof req.body.status === 'string') {
+    const validStatuses = ['online', 'offline', 'pausado'];
+    if (!validStatuses.includes(req.body.status)) {
+      return res.status(400).json({ error: 'Status inválido' });
+    }
+    m.status = req.body.status;
+    m.online = m.status === 'online';
+  }
+
   saveDB(db);
   res.json(sanitizeMotoboy(m));
 });
