@@ -31,7 +31,7 @@
 const fs = require('fs');
 const path = require('path');
 
-constante DB_PATH = process.env.DB_PATH || caminho.juntar(__dirname, 'data.json');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data.json');
 const TMP_PATH = DB_PATH + '.tmp';
 const BAK_PATH = DB_PATH + '.bak';
 
