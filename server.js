@@ -9,19 +9,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-
-
-app.use((req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-  next();
-});
-
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
-
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
-
+const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
 const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
 
 // ---------------------------------------------------------------
@@ -219,6 +209,45 @@ app.get('/api/businesses/:id', (req, res) => {
   res.json(sanitizeBusiness(b));
 });
 
+// Updates basic profile fields. Only the business themself can edit their own record.
+app.patch('/api/businesses/:id', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+
+  if (typeof req.body.name === 'string' && req.body.name.trim()) b.name = req.body.name.trim();
+  if (typeof req.body.phone === 'string' && req.body.phone.trim()) b.phone = req.body.phone.trim();
+  if (typeof req.body.address === 'string' && req.body.address.trim()) b.address = req.body.address.trim();
+  if (typeof req.body.email === 'string' && req.body.email.trim()) {
+    const emailLower = req.body.email.trim().toLowerCase();
+    const taken = Object.values(db.businesses).some((x) => x.id !== b.id && (x.email || '').toLowerCase() === emailLower);
+    if (taken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+    b.email = emailLower;
+  }
+
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+app.post('/api/businesses/:id/change-password', requireAuth('business'), async (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { currentPassword, newPassword, confirmPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Preencha todos os campos' });
+  if (newPassword !== confirmPassword) return res.status(400).json({ error: 'As senhas não coincidem' });
+  if (newPassword.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` });
+  }
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  const ok = await bcrypt.compare(currentPassword, b.passwordHash);
+  if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
+  b.passwordHash = await bcrypt.hash(newPassword, 10);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
 // ---------------------------------------------------------------
 // Motoboys
 // ---------------------------------------------------------------
@@ -246,7 +275,7 @@ app.post('/api/motoboys', async (req, res) => {
     email: emailLower,
     passwordHash,
     vehicle,
-    online: false,
+    status: 'offline', // 'online' | 'pausado' | 'offline'
     createdAt: Date.now()
   };
   db.motoboys[motoboy.id] = motoboy;
@@ -307,29 +336,64 @@ app.get('/api/motoboys/:id', (req, res) => {
   res.json(sanitizeMotoboy(m));
 });
 
-// Used for the online/offline toggle. Only the motoboy themself can flip it.
-app.patch('/api/motoboys/:id', requireAuth('motoboy'), (req, res) => {
+// Reads a motoboy's status, falling back to the old boolean `online` field
+// for accounts created before the online/pausado/offline system existed.
+function motoboyStatus(m) {
+  if (m.status) return m.status;
+  return m.online ? 'online' : 'offline';
+}
+const MOTOBOY_STATUSES = ['online', 'pausado', 'offline'];
+
+// Used for the online/pausado/offline toggle, and for updating basic
+// profile fields. Only the motoboy themself can change their own record.
+app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
   if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
   const db = loadDB();
   const m = db.motoboys[req.params.id];
   if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
 
-  if (typeof req.body.online === 'boolean') {
-    m.online = req.body.online;
-    m.status = m.online ? 'online' : 'offline';
-  }
-
   if (typeof req.body.status === 'string') {
-    const validStatuses = ['online', 'offline', 'pausado'];
-    if (!validStatuses.includes(req.body.status)) {
+    if (!MOTOBOY_STATUSES.includes(req.body.status)) {
       return res.status(400).json({ error: 'Status inválido' });
     }
     m.status = req.body.status;
-    m.online = m.status === 'online';
+    m.online = m.status === 'online'; // kept in sync for backward compatibility
+  } else if (typeof req.body.online === 'boolean') {
+    // Old clients still sending {online: true/false} — keep working.
+    m.status = req.body.online ? 'online' : 'offline';
+    m.online = req.body.online;
+  }
+
+  if (typeof req.body.name === 'string' && req.body.name.trim()) m.name = req.body.name.trim();
+  if (typeof req.body.phone === 'string' && req.body.phone.trim()) m.phone = req.body.phone.trim();
+  if (typeof req.body.vehicle === 'string' && req.body.vehicle.trim()) m.vehicle = req.body.vehicle.trim();
+  if (typeof req.body.email === 'string' && req.body.email.trim()) {
+    const emailLower = req.body.email.trim().toLowerCase();
+    const taken = Object.values(db.motoboys).some((x) => x.id !== m.id && (x.email || '').toLowerCase() === emailLower);
+    if (taken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+    m.email = emailLower;
   }
 
   saveDB(db);
   res.json(sanitizeMotoboy(m));
+});
+
+app.post('/api/motoboys/:id/change-password', requireAuth('motoboy'), async (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { currentPassword, newPassword, confirmPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Preencha todos os campos' });
+  if (newPassword !== confirmPassword) return res.status(400).json({ error: 'As senhas não coincidem' });
+  if (newPassword.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres` });
+  }
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  const ok = await bcrypt.compare(currentPassword, m.passwordHash);
+  if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
+  m.passwordHash = await bcrypt.hash(newPassword, 10);
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------
@@ -529,7 +593,7 @@ function rideCount(db, motoboyId) {
 // If you later add geocoded addresses, sort by distance here instead.
 function buildOfferQueue(db) {
   const candidates = Object.values(db.motoboys).filter((m) => {
-    if (!m.online) return false;
+    if (motoboyStatus(m) !== 'online') return false; // pausado/offline never receive new rides
     const busy = Object.values(db.orders).some(
       (o) => o.motoboyId === m.id && ACTIVE_STATUSES.includes(o.status)
     );
@@ -539,13 +603,30 @@ function buildOfferQueue(db) {
   return candidates.map((m) => m.id);
 }
 
+// Moves the offer to the next motoboy in line (called both when someone
+// explicitly declines and when their 30s window times out). If everyone
+// in the current round has now passed, start a brand new round — re-check
+// who's online right now and ring through everyone again, one at a time,
+// instead of leaving it open to whoever grabs it first.
+function advanceOffer(db, o) {
+  o.offerIndex += 1;
+  if (o.offerIndex >= o.offerQueue.length) {
+    o.offerQueue = buildOfferQueue(db);
+    o.offerIndex = 0;
+    o.declinedBy = []; // fresh round — everyone gets asked again
+  }
+  o.offeredAt = o.offerQueue.length > 0 ? Date.now() : null;
+}
+
 function isOfferedTo(o, motoboyId) {
   if (o.status !== 'pendente') return false;
   if (o.declinedBy && o.declinedBy.includes(motoboyId)) return false;
   if (!o.offerQueue || o.offerQueue.length === 0) return true; // nobody was online — open to anyone
-  if (o.offerIndex >= o.offerQueue.length) return true; // everyone passed — open to anyone left
+  if (o.offerIndex >= o.offerQueue.length) return true; // shouldn't normally happen now — safety fallback
   return o.offerQueue[o.offerIndex] === motoboyId;
 }
+
+const CREDIT_COST_PER_RIDE = 1; // every delivery costs exactly 1 credit, no matter what the motoboy is paid
 
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
@@ -556,11 +637,11 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   if (!pickupAddress || !deliveryAddress || !value) {
     return res.status(400).json({ error: 'Preencha os endereços e o valor' });
   }
-  const rideValue = parseFloat(value) || 0;
+  const rideValue = parseFloat(value) || 0; // what the motoboy gets paid — unrelated to credits now
   const currentCredits = business.credits || 0;
-  if (currentCredits < rideValue) {
+  if (currentCredits < CREDIT_COST_PER_RIDE) {
     return res.status(402).json({
-      error: `Saldo insuficiente (você tem ${currentCredits.toFixed(2)} de crédito) — adicione créditos para solicitar esta entrega.`,
+      error: `Créditos insuficientes (você tem ${currentCredits.toFixed(2)}) — adicione créditos para solicitar esta entrega.`,
       credits: currentCredits
     });
   }
@@ -580,7 +661,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     deliveryAddress,
     pickupCoords, // {lat,lng} or null if the address couldn't be located
     deliveryCoords,
-    value: rideValue,
+    value: rideValue, // paid to the motoboy — does not affect credit balance
     note: note || '',
     status: 'pendente',
     motoboyId: null,
@@ -597,17 +678,19 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     departedAt: null,
     arrivedDeliveryAt: null,
     deliveredAt: null,
-    cancelledAt: null
+    cancelledAt: null,
+    ratedByBusiness: false,
+    ratedByMotoboy: false
   };
   // Re-read the db in case anything else wrote in the meantime (geocoding awaited above).
   const freshDb = loadDB();
   const freshBusiness = freshDb.businesses[businessId];
-  if (!freshBusiness || (freshBusiness.credits || 0) < rideValue) {
-    return res.status(402).json({ error: 'Saldo insuficiente — adicione créditos para solicitar esta entrega.' });
+  if (!freshBusiness || (freshBusiness.credits || 0) < CREDIT_COST_PER_RIDE) {
+    return res.status(402).json({ error: 'Créditos insuficientes — adicione créditos para solicitar esta entrega.' });
   }
-  freshBusiness.credits -= rideValue;
+  freshBusiness.credits -= CREDIT_COST_PER_RIDE;
   freshDb.orders[order.id] = order;
-  addTransaction(freshDb, businessId, 'debito', rideValue, 'Entrega #' + order.id.slice(-6).toUpperCase(), order.id);
+  addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
   saveDB(freshDb);
   res.json(order);
 });
@@ -646,6 +729,9 @@ app.post('/api/orders/:id/accept', requireAuth('motoboy'), (req, res) => {
   const o = db.orders[req.params.id];
   const m = db.motoboys[motoboyId];
   if (!o || !m) return res.status(404).json({ error: 'Não encontrado' });
+  if (motoboyStatus(m) !== 'online') {
+    return res.status(409).json({ error: 'Fique on-line para aceitar corridas' });
+  }
   const alreadyActive = Object.values(db.orders).some(
     (x) => x.motoboyId === motoboyId && ACTIVE_STATUSES.includes(x.status)
   );
@@ -671,8 +757,7 @@ app.post('/api/orders/:id/decline', requireAuth('motoboy'), (req, res) => {
   if (o.status !== 'pendente') return res.json(o);
   o.declinedBy = Array.from(new Set([...(o.declinedBy || []), motoboyId]));
   if (o.offerQueue && o.offerQueue[o.offerIndex] === motoboyId) {
-    o.offerIndex += 1;
-    o.offeredAt = Date.now();
+    advanceOffer(db, o);
   }
   saveDB(db);
   res.json(o);
@@ -765,6 +850,65 @@ app.post(
   stageTransition('no_local_entrega', 'entregue', () => ({ deliveredAt: Date.now() }))
 );
 
+// ---------------------------------------------------------------
+// Ratings — one review per side per completed order (business rates the
+// motoboy, motoboy rates the business). The order itself carries a
+// ratedByBusiness/ratedByMotoboy flag so duplicate-checking is instant
+// and free, no extra lookup needed.
+// ---------------------------------------------------------------
+function ratingSummary(db, type, id) {
+  const list = Object.values(db.ratings || {}).filter((r) => r.toType === type && r.toId === id);
+  if (list.length === 0) return { average: 0, count: 0 };
+  const sum = list.reduce((s, r) => s + r.stars, 0);
+  return { average: Math.round((sum / list.length) * 10) / 10, count: list.length };
+}
+
+app.post('/api/orders/:id/rate', requireAuth('business', 'motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.status !== 'entregue') return res.status(409).json({ error: 'Só é possível avaliar corridas já entregues' });
+
+  const isBusiness = req.authType === 'business' && o.businessId === req.authId;
+  const isMotoboy = req.authType === 'motoboy' && o.motoboyId === req.authId;
+  if (!isBusiness && !isMotoboy) return res.status(403).json({ error: 'Você não participou dessa corrida' });
+
+  if (isBusiness && o.ratedByBusiness) return res.status(409).json({ error: 'Você já avaliou essa corrida' });
+  if (isMotoboy && o.ratedByMotoboy) return res.status(409).json({ error: 'Você já avaliou essa corrida' });
+
+  const stars = parseInt(req.body && req.body.stars, 10);
+  const comment = (req.body && req.body.comment) || '';
+  if (!stars || stars < 1 || stars > 5) return res.status(400).json({ error: 'Escolha de 1 a 5 estrelas' });
+
+  db.ratings = db.ratings || {};
+  const rating = {
+    id: shortId('rate'),
+    orderId: o.id,
+    fromType: req.authType,
+    fromId: req.authId,
+    toType: isBusiness ? 'motoboy' : 'business',
+    toId: isBusiness ? o.motoboyId : o.businessId,
+    stars,
+    comment,
+    createdAt: Date.now()
+  };
+  db.ratings[rating.id] = rating;
+
+  if (isBusiness) o.ratedByBusiness = true;
+  else o.ratedByMotoboy = true;
+
+  saveDB(db);
+  res.json({ ok: true, rating });
+});
+
+// Real average + count for a business or motoboy — never fabricated.
+app.get('/api/ratings/:type/:id/summary', (req, res) => {
+  const { type, id } = req.params;
+  if (type !== 'business' && type !== 'motoboy') return res.status(400).json({ error: 'Tipo inválido' });
+  const db = loadDB();
+  res.json(ratingSummary(db, type, id));
+});
+
 // Either the business that owns the order, or the motoboy currently
 // assigned to it, can cancel — anyone else gets rejected.
 app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res) => {
@@ -779,8 +923,8 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
   if (o.creditsCharged) {
     const business = db.businesses[o.businessId];
     if (business) {
-      business.credits = (business.credits || 0) + o.value;
-      addTransaction(db, o.businessId, 'credito', o.value, 'Estorno — Entrega #' + o.id.slice(-6).toUpperCase() + ' cancelada', o.id);
+      business.credits = (business.credits || 0) + CREDIT_COST_PER_RIDE;
+      addTransaction(db, o.businessId, 'credito', CREDIT_COST_PER_RIDE, 'Estorno — Entrega #' + o.id.slice(-6).toUpperCase() + ' cancelada', o.id);
     }
     o.creditsCharged = false;
   }
@@ -811,8 +955,7 @@ setInterval(() => {
     ) {
       const skipped = o.offerQueue[o.offerIndex];
       o.declinedBy = Array.from(new Set([...(o.declinedBy || []), skipped]));
-      o.offerIndex += 1;
-      o.offeredAt = Date.now();
+      advanceOffer(db, o);
       changed = true;
     }
   });
