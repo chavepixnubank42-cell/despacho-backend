@@ -9,9 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+
 
 app.use((req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -23,7 +21,7 @@ app.use((req, res, next) => {
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
-const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
+
 const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
 
 // ---------------------------------------------------------------
