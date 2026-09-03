@@ -52,6 +52,15 @@ responder antes de passar pro próximo) já está implementada dentro do
 `server.js`, incluindo um relógio de fundo que passa a corrida adiante mesmo
 que ninguém esteja com o app aberto naquele momento.
 
+**Fila por proximidade:** enquanto estiver on-line, o app do motoboy manda
+sua localização pro servidor a cada ~25 segundos (`PATCH /api/motoboys/:id`
+com `{lat, lng}`). Quando uma corrida nova é criada, o endereço de retirada
+já é convertido em coordenadas (geocodificação) — com isso, a fila passa a
+oferecer a corrida primeiro pro motoboy mais PERTO da retirada, e só usa
+"quem fez menos corridas" como critério de desempate ou para motoboys sem
+localização recente (ex: GPS recusado, ou ficou mais de 10 minutos sem
+atualizar).
+
 ## Colocando no ar de verdade (deploy)
 
 Qualquer um destes serviços tem plano gratuito e funciona bem pra começar:
@@ -71,6 +80,32 @@ Passo geral (vale pros três):
 arquivos é apagado a cada novo deploy/reinício. Pra não perder os dados,
 depois de validar que tudo funciona, vale migrar pra um banco de verdade
 (o Railway e o Render oferecem Postgres gratuito, por exemplo).
+
+## Configurando os pagamentos (Mercado Pago / Pix)
+
+Pra ativar a recarga de créditos do comércio via Pix, você precisa:
+
+1. Criar (ou já ter) uma conta no [Mercado Pago](https://www.mercadopago.com.br).
+2. Ir em [mercadopago.com.br/developers/panel](https://www.mercadopago.com.br/developers/panel/app) → criar uma aplicação → pegar o **Access Token** (comece pelo de **teste/sandbox**, pra não usar dinheiro de verdade enquanto valida o fluxo).
+3. No Railway, no seu projeto, ir em **Variables** e adicionar:
+   ```
+   MERCADOPAGO_ACCESS_TOKEN=seu_access_token_aqui
+   ```
+4. (Opcional, mas recomendado) No painel do Mercado Pago, em **Webhooks**, cadastrar a URL:
+   ```
+   https://SUA-API.up.railway.app/api/webhooks/mercadopago
+   ```
+   Isso faz o crédito ser adicionado assim que o Pix é pago, sem precisar esperar o app perguntar. Mesmo sem isso, o app já verifica sozinho a cada poucos segundos enquanto o QR code está na tela.
+
+Sem essa variável configurada, o app continua funcionando normalmente — só a recarga de créditos fica temporariamente desabilitada, com um aviso claro pro usuário.
+
+### Testando sem gastar dinheiro de verdade
+
+O Mercado Pago tem um modo de teste completo: com o Access Token de teste,
+os Pix gerados não movimentam dinheiro real, e você pode simular a
+aprovação do pagamento pelo próprio painel deles. Veja a documentação de
+["Realizar testes"](https://www.mercadopago.com.br/developers/pt/docs/checkout-api/additional-content/your-integrations/test/cards)
+no site do Mercado Pago antes de trocar pro Access Token de produção.
 
 ## Próximo passo
 

@@ -364,6 +364,14 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
     m.online = req.body.online;
   }
 
+  // Live location ping — the app sends this every so often while the
+  // motoboy is online, purely so the offer queue can rank by real
+  // distance to the pickup address (see buildOfferQueue). Not used for
+  // anything else, and never required to keep the account online.
+  if (typeof req.body.lat === 'number' && typeof req.body.lng === 'number') {
+    m.lastLocation = { lat: req.body.lat, lng: req.body.lng, updatedAt: Date.now() };
+  }
+
   if (typeof req.body.name === 'string' && req.body.name.trim()) m.name = req.body.name.trim();
   if (typeof req.body.phone === 'string' && req.body.phone.trim()) m.phone = req.body.phone.trim();
   if (typeof req.body.vehicle === 'string' && req.body.vehicle.trim()) m.vehicle = req.body.vehicle.trim();
@@ -588,10 +596,27 @@ function rideCount(db, motoboyId) {
   ).length;
 }
 
-// Who gets offered the ride first: only online + free motoboys, ordered by
-// whoever has done the fewest rides so far (spreads the work around).
-// If you later add geocoded addresses, sort by distance here instead.
-function buildOfferQueue(db) {
+// How old a motoboy's last known GPS fix can be and still count as "live"
+// for distance sorting. Older than this, we treat them as if we don't
+// know where they are (falls back to the fewest-rides rule for them).
+const LOCATION_FRESHNESS_MS = 10 * 60 * 1000; // 10 minutes
+
+function hasFreshLocation(m) {
+  return !!(
+    m.lastLocation &&
+    typeof m.lastLocation.lat === 'number' &&
+    typeof m.lastLocation.lng === 'number' &&
+    Date.now() - (m.lastLocation.updatedAt || 0) <= LOCATION_FRESHNESS_MS
+  );
+}
+
+// Who gets offered the ride first: only online + free motoboys.
+// If we know the pickup coordinates AND a motoboy's recent live location,
+// the nearest motoboy goes first — that's the fair, real-world way to do
+// it. Motoboys we can't place (no fresh GPS, or the pickup address didn't
+// geocode) fall back to "fewest rides so far", same as before, and are
+// slotted in after everyone we could measure a distance for.
+function buildOfferQueue(db, pickupCoords) {
   const candidates = Object.values(db.motoboys).filter((m) => {
     if (motoboyStatus(m) !== 'online') return false; // pausado/offline never receive new rides
     const busy = Object.values(db.orders).some(
@@ -599,7 +624,18 @@ function buildOfferQueue(db) {
     );
     return !busy;
   });
-  candidates.sort((a, b) => rideCount(db, a.id) - rideCount(db, b.id));
+
+  candidates.sort((a, b) => {
+    const aHasDist = !!pickupCoords && hasFreshLocation(a);
+    const bHasDist = !!pickupCoords && hasFreshLocation(b);
+    if (aHasDist && bHasDist) {
+      const da = distanceMeters(a.lastLocation.lat, a.lastLocation.lng, pickupCoords.lat, pickupCoords.lng);
+      const db_ = distanceMeters(b.lastLocation.lat, b.lastLocation.lng, pickupCoords.lat, pickupCoords.lng);
+      return da - db_;
+    }
+    if (aHasDist !== bHasDist) return aHasDist ? -1 : 1; // known distance beats unknown
+    return rideCount(db, a.id) - rideCount(db, b.id); // tiebreaker / fallback
+  });
   return candidates.map((m) => m.id);
 }
 
@@ -611,7 +647,7 @@ function buildOfferQueue(db) {
 function advanceOffer(db, o) {
   o.offerIndex += 1;
   if (o.offerIndex >= o.offerQueue.length) {
-    o.offerQueue = buildOfferQueue(db);
+    o.offerQueue = buildOfferQueue(db, o.pickupCoords);
     o.offerIndex = 0;
     o.declinedBy = []; // fresh round — everyone gets asked again
   }
@@ -645,12 +681,15 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
       credits: currentCredits
     });
   }
-  const offerQueue = buildOfferQueue(db);
-
-  // Geocode both addresses so we can later enforce the GPS arrival lock.
+  // Geocode both addresses so we can later enforce the GPS arrival lock,
+  // and so the offer queue below can prioritize the nearest motoboy.
   // Sequential on purpose — keeps us within Nominatim's rate limit.
   const pickupCoords = await geocodeAddress(pickupAddress);
   const deliveryCoords = await geocodeAddress(deliveryAddress);
+
+  // Built AFTER geocoding so it can sort candidates by real distance to
+  // the pickup address instead of just fewest-rides-so-far.
+  const offerQueue = buildOfferQueue(db, pickupCoords);
 
   const order = {
     id: shortId('ord'),
