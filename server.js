@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
-const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
+
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
 
 const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
