@@ -1001,7 +1001,15 @@ setInterval(() => {
   if (changed) saveDB(db);
 }, 5000);
 
-app.get('/', (req, res) => res.send('Despacho API rodando ✅'));
+// Serve the front-end (entregas.html) from this same server, so the one
+// Railway URL works both as the API and as the app link people open on
+// their phone. IMPORTANT: only this one file is exposed — never the whole
+// folder (data.json has password hashes and personal data in it, and must
+// never be reachable over HTTP).
+const path = require('path');
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'entregas.html')));
+app.get('/entregas.html', (req, res) => res.sendFile(path.join(__dirname, 'entregas.html')));
+app.get('/api', (req, res) => res.send('Despacho API rodando ✅'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Despacho API na porta ' + PORT));
