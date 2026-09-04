@@ -12,6 +12,11 @@ app.use(express.json());
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
 const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
+// GPS accuracy varies a lot by device (a laptop or a phone with a weak
+// signal can easily report 200-400m of margin). We let the arrival check
+// stretch by up to this much extra, on top of ARRIVAL_RADIUS_METERS, to
+// match the motoboy's own reported accuracy — see arrivalTransition below.
+const MAX_ACCURACY_ALLOWANCE_METERS = 350;
 const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
 
 // ---------------------------------------------------------------
@@ -88,6 +93,10 @@ function sanitizeBusiness(b) {
 function sanitizeMotoboy(m) {
   if (!m) return m;
   const { passwordHash, ...rest } = m;
+  // Always expose the EFFECTIVE status (motoboyStatus applies the forced-
+  // pause override) rather than the raw stored field, so the app can't show
+  // "online" while a timeout penalty is actually keeping them paused.
+  rest.status = motoboyStatus(m);
   return rest;
 }
 function makeToken() {
@@ -336,9 +345,15 @@ app.get('/api/motoboys/:id', (req, res) => {
   res.json(sanitizeMotoboy(m));
 });
 
+const PICKUP_WINDOW_MS = 16 * 60 * 1000; // minutes the motoboy has to reach the pickup after accepting
+const FORCED_PAUSE_MS = 10 * 60 * 1000; // penalty pause after missing that window
+
 // Reads a motoboy's status, falling back to the old boolean `online` field
-// for accounts created before the online/pausado/offline system existed.
+// for accounts created before the online/pausado/offline system existed,
+// and forcing 'pausado' while a timeout penalty (forcedPauseUntil) is still
+// running — even if the stored `status` field says something else.
 function motoboyStatus(m) {
+  if (m.forcedPauseUntil && Date.now() < m.forcedPauseUntil) return 'pausado';
   if (m.status) return m.status;
   return m.online ? 'online' : 'offline';
 }
@@ -355,6 +370,13 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
   if (typeof req.body.status === 'string') {
     if (!MOTOBOY_STATUSES.includes(req.body.status)) {
       return res.status(400).json({ error: 'Status inválido' });
+    }
+    if (req.body.status === 'online' && m.forcedPauseUntil && Date.now() < m.forcedPauseUntil) {
+      const minutesLeft = Math.ceil((m.forcedPauseUntil - Date.now()) / 60000);
+      return res.status(409).json({
+        error: `Você perdeu a última corrida por não chegar a tempo — aguarde mais ${minutesLeft} min para voltar a ficar on-line.`,
+        forcedPauseUntil: m.forcedPauseUntil
+      });
     }
     m.status = req.body.status;
     m.online = m.status === 'online'; // kept in sync for backward compatibility
@@ -802,6 +824,37 @@ app.post('/api/orders/:id/decline', requireAuth('motoboy'), (req, res) => {
   res.json(o);
 });
 
+// A motoboy who already accepted, but needs to back out before actually
+// picking up the package (car broke down, emergency, etc). Unlike /cancel,
+// this does NOT kill the order or refund the business — it puts the ride
+// straight back into the offer queue for the next motoboy in line, exactly
+// like a decline, so the business never has to notice or re-create it.
+// Only allowed up to 'aceito' — once the package is physically in the
+// motoboy's hands (arrived at pickup or later), backing out is a real
+// problem for the business to know about, so that still has to go through
+// /cancel instead.
+app.post('/api/orders/:id/give-up', requireAuth('motoboy'), (req, res) => {
+  const motoboyId = req.authId;
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== motoboyId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (o.status !== 'aceito') {
+    return res.status(409).json({
+      error: 'Só dá pra devolver a corrida antes de retirar o pedido — depois disso, cancele em vez disso.'
+    });
+  }
+  o.declinedBy = Array.from(new Set([...(o.declinedBy || []), motoboyId]));
+  o.status = 'pendente';
+  o.motoboyId = null;
+  o.motoboyName = null;
+  o.motoboyPhone = null;
+  o.acceptedAt = null;
+  advanceOffer(db, o); // hands it to the next motoboy in line, fresh 30s window
+  saveDB(db);
+  res.json(o);
+});
+
 // One helper for the straight-line stage transitions that DON'T need a
 // GPS check (departing doesn't require proximity to anything). Only the
 // motoboy assigned to this specific order can advance it.
@@ -846,9 +899,17 @@ function arrivalTransition(fromStatus, toStatus, coordsField, extraFields) {
     }
     if (target && geo) {
       const dist = Math.round(distanceMeters(geo.lat, geo.lng, target.lat, target.lng));
-      if (dist > ARRIVAL_RADIUS_METERS) {
+      // A GPS fix always comes with a margin of error (geo.acc, in meters —
+      // e.g. weak signal indoors or on a laptop can easily mean 200-400m).
+      // If we ignore that margin, an honestly-arrived motoboy with a rough
+      // fix gets wrongly blocked. So we allow the distance to exceed the
+      // radius by up to the reported accuracy (capped, so a wildly
+      // inaccurate/spoofed reading can't just disable the lock entirely).
+      const accuracyAllowance = Math.min(typeof geo.acc === 'number' ? geo.acc : 0, MAX_ACCURACY_ALLOWANCE_METERS);
+      const effectiveRadius = ARRIVAL_RADIUS_METERS + accuracyAllowance;
+      if (dist > effectiveRadius) {
         return res.status(409).json({
-          error: `Você está a ${dist}m do endereço — chegue mais perto (até ${ARRIVAL_RADIUS_METERS}m) para confirmar.`,
+          error: `Você está a ${dist}m do endereço — chegue mais perto (até ${effectiveRadius}m, considerando a precisão do seu GPS) para confirmar.`,
           distance: dist
         });
       }
@@ -977,7 +1038,16 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
 });
 
 // ---------------------------------------------------------------
-// Background job — advances any offer that timed out without a response.
+// Background job — advances any offer that timed out without a response,
+// and takes back rides from motoboys who accepted but never reached the
+// pickup within PICKUP_WINDOW_MS (same 16-minute window the app already
+// shows as a countdown). That motoboy loses the ride — it goes straight
+// back into the queue for the next one in line, same as a manual "give up"
+// — and gets a forced 10-minute pause before they can go online again.
+// (Only the pickup leg is handled this way: once a motoboy has actually
+// picked up the package, en route to the delivery, there's no one else to
+// hand a physical package to, so a late delivery can't be reassigned the
+// same way — that stays a business decision via cancel/support instead.)
 // Runs on the server itself, so it works even if every phone is asleep.
 // ---------------------------------------------------------------
 setInterval(() => {
@@ -995,6 +1065,25 @@ setInterval(() => {
       const skipped = o.offerQueue[o.offerIndex];
       o.declinedBy = Array.from(new Set([...(o.declinedBy || []), skipped]));
       advanceOffer(db, o);
+      changed = true;
+    }
+
+    if (o.status === 'aceito' && o.acceptedAt && Date.now() - o.acceptedAt > PICKUP_WINDOW_MS) {
+      const missedMotoboyId = o.motoboyId;
+      o.declinedBy = Array.from(new Set([...(o.declinedBy || []), missedMotoboyId]));
+      o.status = 'pendente';
+      o.motoboyId = null;
+      o.motoboyName = null;
+      o.motoboyPhone = null;
+      o.acceptedAt = null;
+      o.missedPickupBy = Array.from(new Set([...(o.missedPickupBy || []), missedMotoboyId]));
+      advanceOffer(db, o);
+
+      const missedMotoboy = db.motoboys[missedMotoboyId];
+      if (missedMotoboy) {
+        missedMotoboy.forcedPauseUntil = Date.now() + FORCED_PAUSE_MS;
+        missedMotoboy.status = 'online'; // stored status stays 'online' — motoboyStatus() overrides to 'pausado' meanwhile, then this takes over automatically once the pause is over
+      }
       changed = true;
     }
   });

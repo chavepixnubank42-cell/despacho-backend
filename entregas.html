@@ -156,6 +156,18 @@
     margin-top:10px;
     line-height:1.4;
   }
+  .btn-copy-addr{
+    flex-shrink:0;
+    font-family:var(--font-mono);
+    font-size:11px;
+    background:transparent;
+    border:1px solid var(--border, #444);
+    color:inherit;
+    border-radius:6px;
+    padding:4px 8px;
+    cursor:pointer;
+  }
+  .btn-copy-addr:active{ opacity:0.6; }
   .active-ride.is-warning{ border-color:#FF3D3D; animation:alert-pulse-red 1s ease-in-out infinite; }
   .active-ride.is-warning .countdown-value{ color:#FF3D3D; }
   .active-ride.is-late{ border-color:#FF3D3D; background:rgba(255,61,61,0.08); }
@@ -1692,6 +1704,19 @@
     if(!result.error) showToast('Corrida recusada');
   }
 
+  // Backing out AFTER accepting, but before picking up the package. Unlike
+  // cancelling, this keeps the ride alive — it just goes back into the
+  // queue for the next motoboy, so the business doesn't need to do anything.
+  async function giveUpOrder(orderId){
+    if(!confirm('Devolver essa corrida? Ela vai direto pro próximo motoboy da fila — o comércio não vai precisar recriar nada.')) return;
+    stopGeoWatch();
+    const result = await apiPost('/api/orders/'+orderId+'/give-up', {});
+    if(result.error){ showToast(result.error); return; }
+    await refreshOrders();
+    render();
+    showToast('Corrida devolvida — foi para o próximo motoboy da fila');
+  }
+
   async function arriveAtPickup(orderId){
     const result = await apiPost('/api/orders/'+orderId+'/arrive-pickup', {geo: liveGeo});
     if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
@@ -2348,6 +2373,7 @@
     return d;
   }
 
+  let lastKnownActiveOrderId = null;
   function renderMotoboyDash(){
     const d = document.createElement('div');
     const curStatus = motoboyStatus();
@@ -2362,6 +2388,15 @@
     const activeOrder = ativa[0] || null;
     if(!activeOrder) stopGeoWatch();
 
+    // If the ride that WAS active a moment ago just vanished, and we're now
+    // in a forced pause, it's because the pickup window expired — the
+    // background job on the server took it back. Say so explicitly instead
+    // of just letting it silently disappear (which would look like a bug).
+    if(!activeOrder && lastKnownActiveOrderId && state.profile && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()){
+      showToast('⏰ Você perdeu essa corrida por não chegar a tempo na retirada — pausa automática de 10 min');
+    }
+    lastKnownActiveOrderId = activeOrder ? activeOrder.id : null;
+
     d.innerHTML = `
       <p class="eyebrow">Painel do motoboy</p>
       <h1 class="page-title">${esc(state.profile.name)}</h1>
@@ -2372,7 +2407,9 @@
         <button class="status-btn is-pausado ${curStatus==='pausado'?'active':''}" data-set-status="pausado">🟡 Pausado</button>
         <button class="status-btn is-offline ${curStatus==='offline'?'active':''}" data-set-status="offline">⚪ Off-line</button>
       </div>
-      ${curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
+      ${curStatus==='pausado' && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()
+        ? `<div class="field-hint" style="margin-bottom:16px;color:#FF6A6A;">⏸️ Pausa automática: você perdeu a última corrida por não chegar a tempo na retirada. Você volta a poder ficar on-line <span id="forced-pause-countdown" data-until="${state.profile.forcedPauseUntil}">em instantes</span>.</div>`
+        : curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
       ${activeOrder ? '' : `<button class="btn-secondary" id="btn-open-sound-picker" style="margin-bottom:20px;">🔊 Som de aviso: ${esc(soundPrefLabel())}</button>`}
       ${activeOrder ? renderActiveRideBanner(activeOrder) : ''}
       <div class="stat-strip">
@@ -2447,8 +2484,20 @@
     `;
   }
 
+  // Renders an address line with a "copiar" button next to it, so the
+  // motoboy can paste it straight into whatever GPS app they actually use
+  // (Waze, Google Maps, etc) instead of retyping it by hand.
+  function renderAddressLine(address){
+    const attr = esc(address).replace(/"/g, '&quot;');
+    return `<div class="active-ride-addr" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <span>📍 ${esc(address)}</span>
+      <button type="button" class="btn-copy-addr" data-copy-address="${attr}" title="Copiar endereço">📋 Copiar</button>
+    </div>`;
+  }
+
   function renderActiveRideBanner(o){
     const cancelLink = `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-cancel="${o.id}">Cancelar corrida</span></div>`;
+    const giveUpLink = `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-give-up="${o.id}">Devolver corrida (não posso mais fazer)</span></div>`;
     if(o.status === 'aceito'){
       return `
         <div class="active-ride" id="active-ride-banner">
@@ -2457,9 +2506,9 @@
             <span class="countdown-value" id="countdown-timer" data-start-at="${o.acceptedAt}">16:00</span>
           </div>
           <div class="active-ride-sub">até a retirada</div>
-          <div class="active-ride-addr">📍 ${esc(o.pickupAddress)}</div>
+          ${renderAddressLine(o.pickupAddress)}
           ${renderGpsLock(o, 'pickupCoords', 'pickup', 'data-arrive-pickup', '📍 Cheguei na retirada')}
-          ${cancelLink}
+          ${giveUpLink}
         </div>
       `;
     }
@@ -2470,7 +2519,7 @@
           <div class="active-ride-head">
             <span class="active-ride-label">📦 Na retirada</span>
           </div>
-          <div class="active-ride-addr">📍 ${esc(o.pickupAddress)}</div>
+          ${renderAddressLine(o.pickupAddress)}
           <div class="active-ride-hint">Colete o pedido e toque em sair quando estiver pronto.</div>
           <button class="btn-stage" data-depart="${o.id}">🚀 Saí para a entrega</button>
           ${cancelLink}
@@ -2485,7 +2534,7 @@
             <span class="countdown-value" id="countdown-timer" data-start-at="${o.departedAt}">16:00</span>
           </div>
           <div class="active-ride-sub">até a entrega</div>
-          <div class="active-ride-addr">📍 ${esc(o.deliveryAddress)}</div>
+          ${renderAddressLine(o.deliveryAddress)}
           ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei na entrega')}
           ${cancelLink}
         </div>
@@ -2498,7 +2547,7 @@
         <div class="active-ride-head">
           <span class="active-ride-label">🏁 No destino</span>
         </div>
-        <div class="active-ride-addr">📍 ${esc(o.deliveryAddress)}</div>
+        ${renderAddressLine(o.deliveryAddress)}
         <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
         <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
       </div>
@@ -3003,6 +3052,34 @@
     root.querySelectorAll('[data-decline]').forEach(elm=>{
       elm.onclick = ()=>declineOrder(elm.getAttribute('data-decline'));
     });
+    root.querySelectorAll('[data-give-up]').forEach(elm=>{
+      elm.onclick = ()=>giveUpOrder(elm.getAttribute('data-give-up'));
+    });
+    root.querySelectorAll('[data-copy-address]').forEach(elm=>{
+      elm.onclick = async ()=>{
+        const address = elm.getAttribute('data-copy-address');
+        let copied = false;
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          try{ await navigator.clipboard.writeText(address); copied = true; }catch(e){ copied = false; }
+        }
+        if(!copied){
+          // Fallback for browsers/contexts where the Clipboard API is
+          // blocked (e.g. no HTTPS, older WebViews): select + execCommand.
+          try{
+            const ta = document.createElement('textarea');
+            ta.value = address;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            copied = document.execCommand('copy');
+            document.body.removeChild(ta);
+          }catch(e){ copied = false; }
+        }
+        showToast(copied ? '📋 Endereço copiado — cole no seu app de GPS' : 'Não consegui copiar automaticamente — selecione o texto manualmente');
+      };
+    });
     root.querySelectorAll('[data-arrive-pickup]').forEach(elm=>{
       elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Registrando…'; arriveAtPickup(elm.getAttribute('data-arrive-pickup')); };
     });
@@ -3082,6 +3159,23 @@
       const remaining = Math.max(0, Math.ceil((offeredAt + OFFER_TIMEOUT_MS - Date.now())/1000));
       oel.textContent = remaining + 's';
     });
+
+    // Forced-pause countdown — shows the motoboy how long is left on the
+    // automatic 10-minute pause applied after missing a pickup window.
+    const pauseEl = root.querySelector('#forced-pause-countdown');
+    if(pauseEl){
+      const until = parseInt(pauseEl.getAttribute('data-until'), 10);
+      const remainingMs = until - Date.now();
+      if(remainingMs <= 0){
+        pauseEl.textContent = 'agora mesmo — atualize a página se ainda aparecer pausado';
+        if(state.profile) refreshOrders().then(render);
+      } else {
+        const totalSec = Math.ceil(remainingMs/1000);
+        const mm = String(Math.floor(totalSec/60)).padStart(2,'0');
+        const ss = String(totalSec%60).padStart(2,'0');
+        pauseEl.textContent = 'em ' + mm + ':' + ss;
+      }
+    }
 
     // GPS arrival lock — updates the live distance readout and enables the
     // "Cheguei" button only once the motoboy is within ARRIVAL_RADIUS_METERS.
