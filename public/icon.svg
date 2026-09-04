@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <rect width="512" height="512" rx="100" fill="#101215"/>
   <rect x="7" y="7" width="498" height="498" rx="93" fill="none" stroke="#C6FF3D" stroke-width="14"/>
-  <text x="50%" y="56%" font-size="260" text-anchor="middle" dominant-baseline="middle">🏍️</text>
+  <text x="50%" y="52%" font-family="'DejaVu Sans', Arial, sans-serif" font-weight="700"
+        font-size="260" fill="#C6FF3D" text-anchor="middle" dominant-baseline="middle">D</text>
 </svg>
