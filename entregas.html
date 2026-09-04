@@ -11,9 +11,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Despacho">
-<link id="apple-touch-icon" rel="apple-touch-icon">
-<link id="favicon-icon" rel="icon" type="image/svg+xml">
-<link id="manifest-link" rel="manifest">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="manifest" href="/manifest.json">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -955,6 +955,10 @@
   @media (max-width:400px){
     .role-emoji{font-size:24px;}
   }
+  @media print{
+    .topbar, .no-print{ display:none !important; }
+    body{ background:#fff; }
+  }
 </style>
 </head>
 <body>
@@ -963,64 +967,15 @@
 <script>
 (function(){
 
-  // ---------- PWA setup (icon, manifest, service worker) ----------
-  // Everything lives inside this single file: the icon is an inline SVG,
-  // the manifest is generated and attached as a data: URI, and the
-  // service worker is registered from a Blob (best-effort — some browsers
-  // restrict Blob-based service workers, so this may silently no-op there;
-  // the "Add to Home Screen" / install behavior still works either way).
-  (function setupPWA(){
-    try{
-      const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-        <rect width="512" height="512" rx="100" fill="#101215"/>
-        <rect x="7" y="7" width="498" height="498" rx="93" fill="none" stroke="#C6FF3D" stroke-width="14"/>
-        <text x="50%" y="56%" font-size="260" text-anchor="middle" dominant-baseline="middle">🏍️</text>
-      </svg>`;
-      const iconUri = 'data:image/svg+xml,' + encodeURIComponent(iconSvg);
-
-      const link1 = document.getElementById('apple-touch-icon'); if(link1) link1.href = iconUri;
-      const link2 = document.getElementById('favicon-icon'); if(link2) link2.href = iconUri;
-
-      const manifest = {
-        name: 'Despacho — Entregas por moto',
-        short_name: 'Despacho',
-        description: 'Comércio pede a corrida, motoboy aceita — despacho de entregas por moto.',
-        start_url: location.href.split('#')[0],
-        scope: location.href.split('#')[0],
-        display: 'standalone',
-        background_color: '#101215',
-        theme_color: '#101215',
-        icons: [
-          {src: iconUri, sizes: '192x192', type: 'image/svg+xml', purpose: 'any'},
-          {src: iconUri, sizes: '512x512', type: 'image/svg+xml', purpose: 'any'},
-          {src: iconUri, sizes: '512x512', type: 'image/svg+xml', purpose: 'maskable'}
-        ]
-      };
-      const manifestUri = 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(manifest));
-      const manifestLink = document.getElementById('manifest-link');
-      if(manifestLink) manifestLink.href = manifestUri;
-
-      if('serviceWorker' in navigator){
-        const swSource = `
-          const CACHE = 'despacho-cache-v1';
-          self.addEventListener('install', e => { self.skipWaiting(); });
-          self.addEventListener('activate', e => { self.clients.claim(); });
-          self.addEventListener('fetch', e => {
-            if(e.request.method !== 'GET') return;
-            e.respondWith(
-              fetch(e.request).then(res=>{
-                caches.open(CACHE).then(c=>c.put(e.request, res.clone()));
-                return res;
-              }).catch(()=> caches.match(e.request))
-            );
-          });
-        `;
-        const blob = new Blob([swSource], {type:'application/javascript'});
-        const swUrl = URL.createObjectURL(blob);
-        navigator.serviceWorker.register(swUrl).catch(()=>{ /* not supported here — fine, app still works */ });
-      }
-    }catch(e){ console.error('Setup PWA falhou', e); }
-  })();
+  // ---------- PWA setup (service worker) ----------
+  // Icon and manifest are now real static files (/icon.svg, /manifest.json)
+  // linked directly in <head>. The service worker is registered from a
+  // real URL (/service-worker.js) — a Blob URL, as this used to do, is
+  // rejected by Chrome and Firefox per spec and never actually installed.
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+      .catch((e) => console.error('Falha ao registrar o service worker', e));
+  }
 
   // ---------- storage helpers ----------
   // Wraps a promise so it always settles within `ms`, even if the storage
@@ -1850,6 +1805,7 @@
     else if(state.screen==='complete-motoboy') main.appendChild(renderCompleteMotoboy());
     else if(state.screen==='business-dash') main.appendChild(renderBusinessDash());
     else if(state.screen==='statement') main.appendChild(renderStatement());
+    else if(state.screen==='invoice') main.appendChild(renderInvoice());
     else if(state.screen==='profile') main.appendChild(renderProfile());
     else if(state.screen==='history-business') main.appendChild(renderHistoryBusiness());
     else if(state.screen==='history-motoboy') main.appendChild(renderHistoryMotoboy());
@@ -1905,8 +1861,9 @@
     if(state.profile){
       const statusDots = {online:' 🟢', pausado:' 🟡', offline:' ⚪'};
       const statusDot = state.role==='motoboy' ? statusDots[motoboyStatus()] : '';
+      const roleIcon = state.role==='business' ? '🏬' : '🏍️';
       right = `
-        <span class="role-chip" id="btn-open-profile" style="cursor:pointer;">${state.role==='business'?'🏬':'🏍️'} ${esc(state.profile.name)}${statusDot}</span>
+        <span class="role-chip" id="btn-open-profile" style="cursor:pointer;">${roleIcon} ${esc(state.profile.name)}${statusDot}</span>
         <button class="btn-ghost" id="btn-logout">Sair</button>
       `;
     }
@@ -1961,6 +1918,7 @@
     `;
     return d;
   }
+
 
   function authField(label, name, type, placeholder){
     return `
@@ -2172,6 +2130,11 @@
       <p class="eyebrow">Financeiro</p>
       <h1 class="page-title">Extrato</h1>
       <p class="page-sub" style="font-family:var(--font-mono);font-size:12px;">Saldo atual: ${formatCredits(state.profile.credits||0)}</p>
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        <button class="btn-secondary" data-open-invoice="hoje">Resumo de hoje</button>
+        <button class="btn-secondary" data-open-invoice="semana">Resumo — 7 dias</button>
+        <button class="btn-secondary" data-open-invoice="mes">Resumo — 30 dias</button>
+      </div>
       <div id="statement-list"></div>
       <div style="margin-top:22px;"><button class="btn-secondary" data-goto="business-dash">← Voltar</button></div>
     `;
@@ -2194,6 +2157,61 @@
         list.appendChild(row);
       });
     }
+    return d;
+  }
+
+  async function openInvoice(period){
+    state.invoice = null;
+    state.invoicePeriod = period;
+    setState({screen:'invoice'});
+    const result = await apiGet('/api/businesses/'+state.myId+'/invoice?period='+period);
+    if(result.error){ showToast(result.error); setState({screen:'statement'}); return; }
+    state.invoice = result;
+    render();
+  }
+
+  function renderInvoice(){
+    const d = document.createElement('div');
+    const inv = state.invoice;
+    if(!inv){
+      d.innerHTML = `<p class="page-sub">Carregando…</p>`;
+      return d;
+    }
+    const rows = inv.orders.map(o => `
+      <tr>
+        <td>${formatDateTime(o.deliveredAt)}</td>
+        <td>${esc(o.pickupAddress)} → ${esc(o.deliveryAddress)}</td>
+        <td style="text-align:right;">${formatCredits(o.value)}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:16px 0;">Nenhuma entrega concluída nesse período.</td></tr>`;
+
+    d.innerHTML = `
+      <div class="no-print" style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="btn-secondary" data-goto="statement">← Voltar</button>
+        <button class="btn-primary" id="btn-print-invoice">🖨️ Salvar / Imprimir</button>
+      </div>
+      <div id="invoice-paper" style="background:#fff;color:#111;padding:24px;border-radius:12px;font-family:Arial,Helvetica,sans-serif;">
+        <h2 style="margin:0 0 4px;">${esc(inv.business.name)}</h2>
+        <p style="margin:0 0 16px;font-size:12px;color:#555;">${esc(inv.business.email||'')}${inv.business.phone?' · '+esc(inv.business.phone):''}${inv.business.address?' · '+esc(inv.business.address):''}</p>
+        <h3 style="margin:0 0 2px;">Resumo de entregas — ${esc(inv.rangeLabel)}</h3>
+        <p style="margin:0 0 16px;font-size:11px;color:#888;">Gerado em ${formatDateTime(inv.generatedAt)} · documento interno, sem valor fiscal</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid #ddd;text-align:left;">
+              <th style="padding:6px 4px;">Data/hora</th>
+              <th style="padding:6px 4px;">Trajeto</th>
+              <th style="padding:6px 4px;text-align:right;">Valor motoboy</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="margin-top:18px;border-top:2px solid #ddd;padding-top:12px;font-size:13px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Entregas concluídas</span><strong>${inv.totals.deliveredCount}</strong></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Total pago aos motoboys</span><strong>${formatCredits(inv.totals.totalPaidToMotoboys)}</strong></div>
+          <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:8px;"><span>Total gasto em créditos da plataforma</span><strong>${formatCredits(inv.totals.totalCreditsSpent)}</strong></div>
+        </div>
+      </div>
+    `;
     return d;
   }
 
@@ -2377,6 +2395,19 @@
   function renderMotoboyDash(){
     const d = document.createElement('div');
     const curStatus = motoboyStatus();
+
+    if(state.profile.approved === false){
+      d.innerHTML = `
+        <p class="eyebrow">Painel do motoboy</p>
+        <h1 class="page-title">${esc(state.profile.name)}</h1>
+        <div class="active-ride is-parked" style="margin-top:16px;">
+          <div class="active-ride-head"><span class="active-ride-label">⏳ Cadastro em análise</span></div>
+          <p class="page-sub" style="margin-top:8px;">Seu cadastro foi recebido e está aguardando aprovação. Assim que for aprovado, você já poderá ficar on-line e começar a receber corridas.</p>
+        </div>
+      `;
+      return d;
+    }
+
     const online = curStatus === 'online';
     const disponiveis = state.availableOrders || [];
     const allMine = state.orders || []; // refreshOrders already keeps only this motoboy's own (non-pendente) orders
@@ -2878,6 +2909,12 @@
       elm.onclick = ()=>setState({screen: elm.getAttribute('data-goto')});
     });
 
+    root.querySelectorAll('[data-open-invoice]').forEach(elm=>{
+      elm.onclick = ()=>openInvoice(elm.getAttribute('data-open-invoice'));
+    });
+    const printInvoiceBtn = $('#btn-print-invoice');
+    if(printInvoiceBtn) printInvoiceBtn.onclick = ()=>window.print();
+
     const logoutBtn = $('#btn-logout');
     if(logoutBtn) logoutBtn.onclick = logout;
 
@@ -2958,6 +2995,7 @@
     root.querySelectorAll('[data-hfilter-status]').forEach(elm=>{
       elm.onclick = ()=>setState({historyStatusFilter: elm.getAttribute('data-hfilter-status')});
     });
+
     const topupClose = $('#topup-close');
     if(topupClose) topupClose.onclick = closeTopup;
     const topupBackdrop = $('#topup-backdrop');

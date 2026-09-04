@@ -99,6 +99,41 @@ Pra ativar a recarga de créditos do comércio via Pix, você precisa:
 
 Sem essa variável configurada, o app continua funcionando normalmente — só a recarga de créditos fica temporariamente desabilitada, com um aviso claro pro usuário.
 
+## Painel administrativo
+
+Existe uma terceira "conta" — a do dono da operação — completamente
+separada do app de comércio/motoboy. É uma página própria (`admin.html`),
+publicada no mesmo servidor, em `/admin` (ex:
+`https://SUA-API.up.railway.app/admin`). Não tem nenhum link dentro do
+`entregas.html` levando até ela — quem administra só precisa saber/
+guardar esse endereço.
+
+O acesso não tem cadastro: é só uma senha, configurada como variável de
+ambiente no Railway:
+
+```
+ADMIN_PASSWORD=escolha_uma_senha_forte_aqui
+```
+
+Depois de configurar essa variável, abra `/admin` e entre com essa senha.
+Lá dá pra ver:
+
+- Resumo geral (comércios, motoboys on-line, corridas em andamento,
+  entregas concluídas, canceladas, receita da plataforma, quanto já foi
+  pago aos motoboys, saldo total em créditos dos comércios).
+- Lista de todos os comércios e motoboys, com botão de **bloquear/
+  desbloquear** — uma conta bloqueada não consegue mais fazer login nem
+  criar/receber novas corridas (corridas já em andamento continuam até o
+  fim normalmente).
+- Motoboys novos entram com **aprovação pendente** — não conseguem ficar
+  on-line até você aprovar pelo painel (os que já existiam antes dessa
+  função continuam funcionando normalmente).
+- Lista das últimas corridas de todo mundo, com status e quem está
+  atendendo cada uma.
+
+Guarde essa senha em local seguro — quem tiver ela tem acesso total ao
+painel administrativo.
+
 ### Testando sem gastar dinheiro de verdade
 
 O Mercado Pago tem um modo de teste completo: com o Access Token de teste,

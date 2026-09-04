@@ -121,12 +121,227 @@ function requireAuth(...allowedTypes) {
     if (!session || (allowedTypes.length && !allowedTypes.includes(session.type))) {
       return res.status(401).json({ error: 'Sessão inválida — faça login novamente' });
     }
+    // A business/motoboy blocked by the admin is locked out immediately,
+    // even with an already-open session — not just on their next login.
+    if (session.type === 'business' && db.businesses[session.id] && db.businesses[session.id].blocked) {
+      return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+    }
+    if (session.type === 'motoboy' && db.motoboys[session.id] && db.motoboys[session.id].blocked) {
+      return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+    }
     req.authType = session.type;
     req.authId = session.id;
     next();
   };
 }
 const PASSWORD_MIN_LENGTH = 6;
+
+// ---------------------------------------------------------------
+// Admin — a single owner account, not a normal signup. The password
+// lives in an environment variable (ADMIN_PASSWORD on Railway) instead of
+// the database, so there's no registration flow to secure or lose access
+// to. Anyone with that password gets a session of type 'admin', same
+// mechanism as business/motoboy sessions (requireAuth('admin') below).
+app.post('/api/admin/login', (req, res) => {
+  const { password } = req.body || {};
+  const expected = process.env.ADMIN_PASSWORD;
+  if (!expected) {
+    return res.status(503).json({ error: 'Painel administrativo ainda não configurado neste servidor (falta ADMIN_PASSWORD).' });
+  }
+  if (!password || password !== expected) {
+    return res.status(401).json({ error: 'Senha incorreta' });
+  }
+  const db = loadDB();
+  const token = createSession(db, 'admin', 'admin');
+  saveDB(db);
+  res.json({ token });
+});
+
+// Whole-picture views — every business, every motoboy, every order, plus a
+// rollup summary. All read-only; the platform-owner UI is built on top of
+// these on the front-end.
+app.get('/api/admin/businesses', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.businesses).map((b) => {
+    const ridesCount = Object.values(db.orders).filter((o) => o.businessId === b.id && o.status === 'entregue').length;
+    return Object.assign(sanitizeBusiness(b), { ridesCount });
+  });
+  res.json(list);
+});
+
+app.get('/api/admin/motoboys', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.motoboys).map((m) => {
+    const ridesCount = Object.values(db.orders).filter((o) => o.motoboyId === m.id && o.status === 'entregue').length;
+    return Object.assign(sanitizeMotoboy(m), { ridesCount, rating: ratingSummary(db, 'motoboy', m.id) });
+  });
+  res.json(list);
+});
+
+app.get('/api/admin/orders', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  let list = Object.values(db.orders);
+  if (req.query.status) list = list.filter((o) => o.status === req.query.status);
+  list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  res.json(list.slice(0, 500)); // plenty for a dashboard; avoids ever shipping an unbounded list
+});
+
+app.get('/api/admin/summary', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const orders = Object.values(db.orders);
+  const delivered = orders.filter((o) => o.status === 'entregue');
+  const active = orders.filter((o) => ACTIVE_STATUSES.includes(o.status));
+  const businesses = Object.values(db.businesses);
+  const motoboys = Object.values(db.motoboys);
+  res.json({
+    totalBusinesses: businesses.length,
+    totalMotoboys: motoboys.length,
+    motoboysOnline: motoboys.filter((m) => motoboyStatus(m) === 'online').length,
+    motoboysPendingApproval: motoboys.filter((m) => m.approved === false).length,
+    totalOrders: orders.length,
+    deliveredOrders: delivered.length,
+    activeOrders: active.length,
+    canceledOrders: orders.filter((o) => o.status === 'cancelado').length,
+    // Platform revenue so far: CREDIT_COST_PER_RIDE per completed delivery.
+    platformRevenue: delivered.length * CREDIT_COST_PER_RIDE,
+    // Total paid out to motoboys so far (the `value` field on each order is
+    // what the motoboy earns for it — set when the business creates the ride).
+    totalPaidToMotoboys: delivered.reduce((sum, o) => sum + (o.value || 0), 0),
+    creditsInCirculation: businesses.reduce((sum, b) => sum + (b.credits || 0), 0)
+  });
+});
+
+// Report buckets for the admin dashboard's chart. `period` controls both
+// the range covered and how it's sliced:
+//   'hoje'   -> today, one bucket per hour (00h..current hour)
+//   'semana' -> last 7 days, one bucket per day
+//   'mes'    -> last 30 days, one bucket per day
+// Each bucket reports deliveries, cancellations, platform revenue (an
+// automatic CREDIT_COST_PER_RIDE per delivery) and total paid to motoboys
+// (the sum of each delivered ride's own `value`) — everything the chart
+// and the totals row need, computed once here instead of on the front-end.
+app.get('/api/admin/reports', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const period = ['hoje', 'semana', 'mes'].includes(req.query.period) ? req.query.period : 'semana';
+  const orders = Object.values(db.orders);
+  const now = new Date();
+
+  let buckets; // [{label, start, end}]
+  if (period === 'hoje') {
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    buckets = [];
+    for (let h = 0; h <= now.getHours(); h++) {
+      const start = new Date(startOfDay).setHours(h, 0, 0, 0);
+      const end = new Date(startOfDay).setHours(h, 59, 59, 999);
+      buckets.push({ label: String(h).padStart(2, '0') + 'h', start, end });
+    }
+  } else {
+    const days = period === 'semana' ? 7 : 30;
+    buckets = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const start = new Date(day).setHours(0, 0, 0, 0);
+      const end = new Date(day).setHours(23, 59, 59, 999);
+      buckets.push({ label: String(day.getDate()).padStart(2, '0') + '/' + String(day.getMonth() + 1).padStart(2, '0'), start, end });
+    }
+  }
+
+  const series = buckets.map((b) => {
+    const delivered = orders.filter((o) => o.status === 'entregue' && o.deliveredAt >= b.start && o.deliveredAt <= b.end);
+    const canceled = orders.filter((o) => o.status === 'cancelado' && o.cancelledAt >= b.start && o.cancelledAt <= b.end);
+    return {
+      label: b.label,
+      delivered: delivered.length,
+      canceled: canceled.length,
+      revenue: delivered.length * CREDIT_COST_PER_RIDE,
+      paidToMotoboys: delivered.reduce((sum, o) => sum + (o.value || 0), 0)
+    };
+  });
+
+  const totals = series.reduce(
+    (acc, s) => ({
+      delivered: acc.delivered + s.delivered,
+      canceled: acc.canceled + s.canceled,
+      revenue: acc.revenue + s.revenue,
+      paidToMotoboys: acc.paidToMotoboys + s.paidToMotoboys
+    }),
+    { delivered: 0, canceled: 0, revenue: 0, paidToMotoboys: 0 }
+  );
+
+  res.json({ period, series, totals });
+});
+
+// Block / unblock — a blocked business can't log in or create new rides; a
+// blocked motoboy can't log in and is treated as offline for new offers.
+// Existing in-progress rides are left alone (finish naturally) rather than
+// yanked out from under whoever's mid-delivery.
+app.patch('/api/admin/businesses/:id/block', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  b.blocked = !!req.body.blocked;
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+app.patch('/api/admin/motoboys/:id/block', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.blocked = !!req.body.blocked;
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
+// Approve (or reject/undo) a motoboy's registration. A rejected motoboy
+// simply stays approved:false — they keep their account and can be
+// approved later if it was a mistake, rather than being deleted outright.
+app.patch('/api/admin/motoboys/:id/approve', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.approved = !!req.body.approved;
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
+// Editing a comércio/motoboy's own basic details from the admin panel —
+// same validation as their own self-edit routes above, just reachable by
+// an admin instead of requiring the account holder to do it themselves.
+app.patch('/api/admin/businesses/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  if (typeof req.body.name === 'string' && req.body.name.trim()) b.name = req.body.name.trim();
+  if (typeof req.body.phone === 'string' && req.body.phone.trim()) b.phone = req.body.phone.trim();
+  if (typeof req.body.address === 'string' && req.body.address.trim()) b.address = req.body.address.trim();
+  if (typeof req.body.email === 'string' && req.body.email.trim()) {
+    const emailLower = req.body.email.trim().toLowerCase();
+    const taken = Object.values(db.businesses).some((x) => x.id !== b.id && (x.email || '').toLowerCase() === emailLower);
+    if (taken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+    b.email = emailLower;
+  }
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+app.patch('/api/admin/motoboys/:id/details', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  if (typeof req.body.name === 'string' && req.body.name.trim()) m.name = req.body.name.trim();
+  if (typeof req.body.phone === 'string' && req.body.phone.trim()) m.phone = req.body.phone.trim();
+  if (typeof req.body.vehicle === 'string' && req.body.vehicle.trim()) m.vehicle = req.body.vehicle.trim();
+  if (typeof req.body.email === 'string' && req.body.email.trim()) {
+    const emailLower = req.body.email.trim().toLowerCase();
+    const taken = Object.values(db.motoboys).some((x) => x.id !== m.id && (x.email || '').toLowerCase() === emailLower);
+    if (taken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+    m.email = emailLower;
+  }
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
 
 // ---------------------------------------------------------------
 // Businesses
@@ -175,6 +390,9 @@ app.post('/api/businesses/login', async (req, res) => {
   }
   const ok = await bcrypt.compare(password, business.passwordHash);
   if (!ok) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  if (business.blocked) {
+    return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+  }
   const token = createSession(db, 'business', business.id);
   saveDB(db);
   res.json({ token, business: sanitizeBusiness(business) });
@@ -285,6 +503,7 @@ app.post('/api/motoboys', async (req, res) => {
     passwordHash,
     vehicle,
     status: 'offline', // 'online' | 'pausado' | 'offline'
+    approved: false, // an admin has to approve before this motoboy can go online / receive rides
     createdAt: Date.now()
   };
   db.motoboys[motoboy.id] = motoboy;
@@ -304,6 +523,9 @@ app.post('/api/motoboys/login', async (req, res) => {
   }
   const ok = await bcrypt.compare(password, motoboy.passwordHash);
   if (!ok) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  if (motoboy.blocked) {
+    return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+  }
   const token = createSession(db, 'motoboy', motoboy.id);
   saveDB(db);
   res.json({ token, motoboy: sanitizeMotoboy(motoboy) });
@@ -353,6 +575,12 @@ const FORCED_PAUSE_MS = 10 * 60 * 1000; // penalty pause after missing that wind
 // and forcing 'pausado' while a timeout penalty (forcedPauseUntil) is still
 // running — even if the stored `status` field says something else.
 function motoboyStatus(m) {
+  if (m.blocked) return 'offline'; // blocked accounts never receive new rides, no matter their own toggle
+  // approved === false (explicitly) means still awaiting admin review — a
+  // motoboy record from before this feature existed has no `approved`
+  // field at all (undefined), and stays treated as already approved so
+  // existing accounts aren't suddenly locked out by this update.
+  if (m.approved === false) return 'offline';
   if (m.forcedPauseUntil && Date.now() < m.forcedPauseUntil) return 'pausado';
   if (m.status) return m.status;
   return m.online ? 'online' : 'offline';
@@ -371,6 +599,9 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
     if (!MOTOBOY_STATUSES.includes(req.body.status)) {
       return res.status(400).json({ error: 'Status inválido' });
     }
+    if (req.body.status === 'online' && m.approved === false) {
+      return res.status(403).json({ error: 'Seu cadastro ainda está em análise — você poderá ficar on-line assim que for aprovado.' });
+    }
     if (req.body.status === 'online' && m.forcedPauseUntil && Date.now() < m.forcedPauseUntil) {
       const minutesLeft = Math.ceil((m.forcedPauseUntil - Date.now()) / 60000);
       return res.status(409).json({
@@ -382,6 +613,9 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
     m.online = m.status === 'online'; // kept in sync for backward compatibility
   } else if (typeof req.body.online === 'boolean') {
     // Old clients still sending {online: true/false} — keep working.
+    if (req.body.online && m.approved === false) {
+      return res.status(403).json({ error: 'Seu cadastro ainda está em análise — você poderá ficar on-line assim que for aprovado.' });
+    }
     m.status = req.body.online ? 'online' : 'offline';
     m.online = req.body.online;
   }
@@ -443,10 +677,15 @@ app.get('/api/me', (req, res) => {
   if (session.type === 'business') {
     const b = db.businesses[session.id];
     if (!b) return res.status(401).json({ error: 'Conta não encontrada' });
+    if (b.blocked) return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
     return res.json({ type: 'business', profile: sanitizeBusiness(b) });
+  }
+  if (session.type === 'admin') {
+    return res.json({ type: 'admin', profile: { id: 'admin', name: 'Administrador' } });
   }
   const m = db.motoboys[session.id];
   if (!m) return res.status(401).json({ error: 'Conta não encontrada' });
+  if (m.blocked) return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
   res.json({ type: 'motoboy', profile: sanitizeMotoboy(m) });
 });
 
@@ -488,6 +727,61 @@ app.get('/api/businesses/:id/transactions', requireAuth('business'), (req, res) 
   const list = Object.values(db.transactions).filter((t) => t.businessId === req.params.id);
   list.sort((a, b) => b.createdAt - a.createdAt);
   res.json(list);
+});
+
+// A simple, printable internal summary/receipt for the business — NOT an
+// official fiscal invoice (nota fiscal eletrônica). Brazilian tax rules for
+// that depend on how the business is registered (CNPJ/MEI/etc) and usually
+// require a paid third-party integration (NFe.io, Focus NFe...), which is
+// out of scope here. This just totals up what the business actually spent
+// in a period, for their own records.
+app.get('/api/businesses/:id/invoice', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const business = db.businesses[req.params.id];
+  if (!business) return res.status(404).json({ error: 'Comércio não encontrado' });
+
+  const period = ['hoje', 'semana', 'mes'].includes(req.query.period) ? req.query.period : 'mes';
+  const now = new Date();
+  let start;
+  let rangeLabel;
+  if (period === 'hoje') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    rangeLabel = 'Hoje (' + now.toLocaleDateString('pt-BR') + ')';
+  } else if (period === 'semana') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime();
+    rangeLabel = 'Últimos 7 dias';
+  } else {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29).getTime();
+    rangeLabel = 'Últimos 30 dias';
+  }
+
+  const orders = Object.values(db.orders)
+    .filter((o) => o.businessId === business.id && o.status === 'entregue' && o.deliveredAt >= start)
+    .sort((a, b) => a.deliveredAt - b.deliveredAt);
+
+  const totalCreditsSpent = orders.length * CREDIT_COST_PER_RIDE;
+  const totalPaidToMotoboys = orders.reduce((sum, o) => sum + (o.value || 0), 0);
+
+  res.json({
+    business: { name: business.name, email: business.email, phone: business.phone, address: business.address },
+    period,
+    rangeLabel,
+    generatedAt: Date.now(),
+    orders: orders.map((o) => ({
+      id: o.id,
+      deliveredAt: o.deliveredAt,
+      value: o.value,
+      pickupAddress: o.pickupAddress,
+      deliveryAddress: o.deliveryAddress,
+      motoboyName: o.motoboyName || null
+    })),
+    totals: {
+      deliveredCount: orders.length,
+      totalCreditsSpent,
+      totalPaidToMotoboys
+    }
+  });
 });
 
 // ---------------------------------------------------------------
@@ -1096,8 +1390,17 @@ setInterval(() => {
 // folder (data.json has password hashes and personal data in it, and must
 // never be reachable over HTTP).
 const path = require('path');
+// PWA assets (manifest, icon, service worker) live in their own folder —
+// express.static only exposes what's inside public/, never the project
+// root, so data.json (password hashes, personal data) stays unreachable.
+app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'entregas.html')));
 app.get('/entregas.html', (req, res) => res.sendFile(path.join(__dirname, 'entregas.html')));
+// Admin panel — a completely separate page from the business/motoboy app,
+// with its own link. Not linked from entregas.html at all; whoever runs
+// the operation just needs to know/bookmark this address directly.
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/api', (req, res) => res.send('Despacho API rodando ✅'));
 
 const PORT = process.env.PORT || 3000;

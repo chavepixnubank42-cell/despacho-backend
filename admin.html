@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Despacho — Painel administrativo</title>
+<style>
+  :root{
+    --bg:#0B0B0F;
+    --card:#15151B;
+    --border:#2A2A33;
+    --text:#F2F2F2;
+    --muted:#8A8A95;
+    --lime:#C6FF3D;
+    --danger:#FF6A6A;
+    --warn:#FFD166;
+    --ok:#4CD964;
+    --font-mono: 'Courier New', monospace;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+  }
+  .wrap{ max-width:720px; margin:0 auto; padding:24px 18px 60px; }
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:24px;
+  }
+  .brand{ font-family:var(--font-mono); font-weight:700; letter-spacing:1px; }
+  .brand-tag{ display:block; font-size:11px; color:var(--muted); font-weight:400; letter-spacing:0; }
+  .eyebrow{ color:var(--lime); font-family:var(--font-mono); font-size:12px; text-transform:uppercase; letter-spacing:1px; margin:0 0 6px; }
+  h1{ margin:0 0 18px; font-size:24px; }
+  .field{ margin-bottom:14px; }
+  .field label{ display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .field input{
+    width:100%; padding:12px 14px; border-radius:10px;
+    background:var(--card); border:1px solid var(--border); color:var(--text); font-size:15px;
+  }
+  .btn{
+    display:inline-block; padding:12px 18px; border-radius:10px; border:none;
+    background:var(--lime); color:#0B0B0F; font-weight:700; cursor:pointer; font-size:15px;
+  }
+  .btn:disabled{ opacity:0.5; cursor:default; }
+  .btn-ghost{
+    background:transparent; border:1px solid var(--border); color:var(--text);
+    padding:8px 14px; border-radius:8px; cursor:pointer; font-size:13px;
+  }
+  .btn-danger{ border-color:var(--danger); color:var(--danger); }
+  .btn-ok{ border-color:var(--ok); color:var(--ok); }
+  .error-box{ color:var(--danger); font-size:13px; margin-top:10px; min-height:16px; }
+  .tabs{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+  .tab{
+    padding:8px 14px; border-radius:20px; border:1px solid var(--border);
+    background:transparent; color:var(--muted); cursor:pointer; font-size:13px;
+  }
+  .tab.active{ background:var(--lime); color:#0B0B0F; border-color:var(--lime); font-weight:700; }
+  .grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:6px; }
+  .stat{ border:1px solid var(--border); border-radius:10px; padding:14px; background:var(--card); }
+  .stat-value{ display:block; font-size:22px; font-weight:700; }
+  .stat-label{ display:block; font-size:11px; color:var(--muted); margin-top:4px; }
+  .row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border:1px solid var(--border); border-radius:10px; padding:12px 14px;
+    margin-bottom:10px; background:var(--card);
+  }
+  .row-main{ flex:1; min-width:0; }
+  .row-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+  .row-actions{ display:flex; flex-direction:column; gap:6px; align-items:stretch; flex-shrink:0; }
+  .badge{ font-size:10px; border:1px solid var(--border); border-radius:6px; padding:1px 6px; margin-left:4px; }
+  .badge.blocked{ color:var(--danger); border-color:var(--danger); }
+  .badge.pending{ color:var(--warn); border-color:var(--warn); }
+  .empty{ color:var(--muted); font-size:14px; }
+  .loading{ color:var(--muted); font-size:14px; }
+  .edit-input{
+    padding:8px 10px; border-radius:8px; background:var(--bg);
+    border:1px solid var(--border); color:var(--text); font-size:13px;
+  }
+  #toast{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+    background:#1F1F27; border:1px solid var(--border); color:var(--text);
+    padding:10px 16px; border-radius:10px; font-size:13px; opacity:0; transition:opacity .2s;
+    pointer-events:none; max-width:90vw; text-align:center;
+  }
+  #toast.show{ opacity:1; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="toast"></div>
+<script>
+(function(){
+  // Same-origin API — this file is served by the same backend it manages.
+  const API_BASE = '';
+  const TOKEN_KEY = 'despacho-admin-token';
+
+  let state = {
+    token: localStorage.getItem(TOKEN_KEY) || null,
+    screen: 'login',
+    loginError: '',
+    loginBusy: false,
+    tab: 'resumo',
+    summary: null,
+    businesses: [],
+    motoboys: [],
+    orders: [],
+    reportPeriod: 'semana',
+    report: null,
+    editingId: null // id of the business/motoboy row currently showing its edit form (only one at a time)
+  };
+
+  function esc(s){
+    return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function formatMoney(v){
+    return 'R$ ' + (Number(v)||0).toFixed(2).replace('.', ',');
+  }
+  function showToast(msg){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(showToast._h);
+    showToast._h = setTimeout(()=>t.classList.remove('show'), 2600);
+  }
+
+  async function api(method, path, body){
+    try{
+      const res = await fetch(API_BASE + path, {
+        method,
+        headers: Object.assign(
+          {'Content-Type':'application/json'},
+          state.token ? {'Authorization':'Bearer '+state.token} : {}
+        ),
+        body: body!==undefined ? JSON.stringify(body) : undefined
+      });
+      const data = await res.json().catch(()=>null);
+      if(res.status === 401){
+        // token expired/invalid — bounce back to login
+        state.token = null;
+        localStorage.removeItem(TOKEN_KEY);
+        state.screen = 'login';
+        render();
+        return {error:(data&&data.error)||'Sessão expirada — entre novamente'};
+      }
+      if(!res.ok) return {error:(data&&data.error)||'Erro no servidor'};
+      return data || {};
+    }catch(e){
+      return {error:'Não consegui falar com o servidor'};
+    }
+  }
+
+  async function login(password){
+    state.loginBusy = true; state.loginError=''; render();
+    const result = await api('POST', '/api/admin/login', {password});
+    state.loginBusy = false;
+    if(result.error){ state.loginError = result.error; render(); return; }
+    state.token = result.token;
+    localStorage.setItem(TOKEN_KEY, result.token);
+    state.screen = 'dash';
+    await loadAll();
+    render();
+    startPolling();
+  }
+
+  function logout(){
+    state.token = null;
+    localStorage.removeItem(TOKEN_KEY);
+    state.screen = 'login';
+    stopPolling();
+    render();
+  }
+
+  async function loadAll(){
+    const [summary, businesses, motoboys, orders] = await Promise.all([
+      api('GET', '/api/admin/summary'),
+      api('GET', '/api/admin/businesses'),
+      api('GET', '/api/admin/motoboys'),
+      api('GET', '/api/admin/orders')
+    ]);
+    if(!summary.error) state.summary = summary;
+    if(Array.isArray(businesses)) state.businesses = businesses;
+    if(Array.isArray(motoboys)) state.motoboys = motoboys;
+    if(Array.isArray(orders)) state.orders = orders;
+  }
+
+  async function loadReport(){
+    const result = await api('GET', '/api/admin/reports?period='+state.reportPeriod);
+    if(!result.error) state.report = result;
+  }
+
+  let pollHandle = null;
+  function startPolling(){
+    stopPolling();
+    pollHandle = setInterval(async ()=>{
+      if(state.screen !== 'dash') return;
+      await loadAll();
+      if(state.tab === 'relatorios') await loadReport();
+      render();
+    }, 8000);
+  }
+  function stopPolling(){ if(pollHandle) clearInterval(pollHandle); pollHandle=null; }
+
+  async function toggleBusinessBlock(id, blocked){
+    if(blocked && !confirm('Bloquear esse comércio? Ele não vai conseguir fazer login nem pedir novas entregas.')) return;
+    const result = await api('PATCH', '/api/admin/businesses/'+id+'/block', {blocked});
+    if(result.error){ showToast(result.error); return; }
+    showToast(blocked ? 'Comércio bloqueado' : 'Comércio desbloqueado');
+    await loadAll(); render();
+  }
+  async function toggleMotoboyBlock(id, blocked){
+    if(blocked && !confirm('Bloquear esse motoboy? Ele não vai conseguir fazer login nem receber novas corridas.')) return;
+    const result = await api('PATCH', '/api/admin/motoboys/'+id+'/block', {blocked});
+    if(result.error){ showToast(result.error); return; }
+    showToast(blocked ? 'Motoboy bloqueado' : 'Motoboy desbloqueado');
+    await loadAll(); render();
+  }
+  async function approveMotoboy(id){
+    const result = await api('PATCH', '/api/admin/motoboys/'+id+'/approve', {approved:true});
+    if(result.error){ showToast(result.error); return; }
+    showToast('✓ Motoboy aprovado — já pode ficar on-line');
+    await loadAll(); render();
+  }
+  async function saveBusinessEdit(id, data){
+    const result = await api('PATCH', '/api/admin/businesses/'+id, data);
+    if(result.error){ showToast(result.error); return; }
+    showToast('Comércio atualizado');
+    state.editingId = null;
+    await loadAll();
+    render();
+  }
+  async function saveMotoboyEdit(id, data){
+    const result = await api('PATCH', '/api/admin/motoboys/'+id+'/details', data);
+    if(result.error){ showToast(result.error); return; }
+    showToast('Motoboy atualizado');
+    state.editingId = null;
+    await loadAll();
+    render();
+  }
+
+  const STATUS_LABELS = {
+    pendente:'Procurando motoboy', aceito:'Aceita', no_local_retirada:'Na retirada',
+    em_entrega:'Em entrega', no_local_entrega:'No destino', entregue:'Entregue', cancelado:'Cancelada'
+  };
+
+  function renderLogin(){
+    return `
+      <p class="eyebrow">Despacho</p>
+      <h1>Painel administrativo</h1>
+      <div class="field">
+        <label>Senha de administrador</label>
+        <input type="password" id="admin-password" placeholder="••••••••">
+      </div>
+      <button class="btn" id="btn-login" ${state.loginBusy?'disabled':''}>${state.loginBusy?'Entrando…':'Entrar'}</button>
+      <div class="error-box">${esc(state.loginError)}</div>
+    `;
+  }
+
+  function renderBarChart(series){
+    if(!series || !series.length) return '<p class="empty">Sem dados no período.</p>';
+    const w = 600, h = 160, padBottom = 22, padTop = 10;
+    const maxVal = Math.max(1, ...series.map(s=>s.delivered));
+    const barW = w / series.length;
+    const bars = series.map((s, i) => {
+      const barH = ((h - padBottom - padTop) * s.delivered) / maxVal;
+      const x = i * barW + barW*0.15;
+      const y = h - padBottom - barH;
+      const bw = barW * 0.7;
+      const showLabel = series.length <= 10 || i % Math.ceil(series.length/10) === 0;
+      return `
+        <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(barH,1).toFixed(1)}" rx="3" fill="var(--lime)"><title>${esc(s.label)}: ${s.delivered} entregas</title></rect>
+        ${s.delivered>0 ? `<text x="${(x+bw/2).toFixed(1)}" y="${(y-4).toFixed(1)}" font-size="9" fill="#8A8A95" text-anchor="middle">${s.delivered}</text>` : ''}
+        ${showLabel ? `<text x="${(x+bw/2).toFixed(1)}" y="${h-6}" font-size="9" fill="#8A8A95" text-anchor="middle">${esc(s.label)}</text>` : ''}
+      `;
+    }).join('');
+    return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block;">${bars}</svg>`;
+  }
+
+  function renderDash(){
+    const s = state.summary;
+    const tabBtn = (key,label) => `<button class="tab ${state.tab===key?'active':''}" data-tab="${key}">${label}</button>`;
+
+    let body = '';
+    if(state.tab === 'resumo'){
+      body = !s ? '<p class="loading">Carregando…</p>' : `
+        <div class="grid">
+          <div class="stat"><span class="stat-value">${s.totalBusinesses}</span><span class="stat-label">Comércios</span></div>
+          <div class="stat"><span class="stat-value">${s.totalMotoboys}</span><span class="stat-label">Motoboys (${s.motoboysOnline} on-line)</span></div>
+          ${s.motoboysPendingApproval>0 ? `<div class="stat" style="border-color:var(--warn);"><span class="stat-value" style="color:var(--warn);">${s.motoboysPendingApproval}</span><span class="stat-label">Aguardando aprovação</span></div>` : ''}
+          <div class="stat"><span class="stat-value">${s.activeOrders}</span><span class="stat-label">Corridas em andamento</span></div>
+          <div class="stat"><span class="stat-value">${s.deliveredOrders}</span><span class="stat-label">Entregas concluídas</span></div>
+          <div class="stat"><span class="stat-value">${s.canceledOrders}</span><span class="stat-label">Canceladas</span></div>
+          <div class="stat"><span class="stat-value">${formatMoney(s.platformRevenue)}</span><span class="stat-label">Receita da plataforma</span></div>
+          <div class="stat"><span class="stat-value">${formatMoney(s.totalPaidToMotoboys)}</span><span class="stat-label">Pago a motoboys (total)</span></div>
+          <div class="stat"><span class="stat-value">${formatMoney(s.creditsInCirculation)}</span><span class="stat-label">Créditos em carteira</span></div>
+        </div>
+      `;
+    } else if(state.tab === 'comercios'){
+      body = (state.businesses||[]).map(b => `
+        <div class="row" style="flex-direction:column;align-items:stretch;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <div class="row-main">
+              <strong>${esc(b.name)}</strong>${b.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}
+              <div class="row-sub">${esc(b.email||b.phone||'')} · ${b.ridesCount||0} entregas · saldo ${formatMoney(b.credits||0)}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn-ghost" data-edit-business="${b.id}">Editar</button>
+              <button class="btn-ghost ${b.blocked?'btn-ok':'btn-danger'}" data-block-business="${b.id}" data-blocked="${b.blocked?'0':'1'}">${b.blocked?'Desbloquear':'Bloquear'}</button>
+            </div>
+          </div>
+          ${state.editingId===b.id ? `
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:grid;gap:8px;">
+            <input class="edit-input" data-field="name" value="${esc(b.name)}" placeholder="Nome">
+            <input class="edit-input" data-field="phone" value="${esc(b.phone||'')}" placeholder="Telefone">
+            <input class="edit-input" data-field="email" value="${esc(b.email||'')}" placeholder="E-mail">
+            <input class="edit-input" data-field="address" value="${esc(b.address||'')}" placeholder="Endereço">
+            <div style="display:flex;gap:8px;">
+              <button class="btn-ghost btn-ok" data-save-business="${b.id}">Salvar</button>
+              <button class="btn-ghost" data-cancel-edit="1">Cancelar</button>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      `).join('') || '<p class="empty">Nenhum comércio cadastrado ainda.</p>';
+    } else if(state.tab === 'motoboys'){
+      const sorted = (state.motoboys||[]).slice().sort((a,b)=> (a.approved===false?0:1) - (b.approved===false?0:1));
+      body = sorted.map(m => `
+        <div class="row" style="flex-direction:column;align-items:stretch;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <div class="row-main">
+              <strong>${esc(m.name)}</strong>${m.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}${m.approved===false?'<span class="badge pending">AGUARDANDO APROVAÇÃO</span>':''}
+              <div class="row-sub">${esc(m.email||m.phone||'')} · ${esc(m.vehicle||'')} · ${m.ridesCount||0} entregas · status ${esc(m.status||'offline')}${m.rating&&m.rating.count?' · ⭐ '+m.rating.average.toFixed(1):''}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn-ghost" data-edit-motoboy="${m.id}">Editar</button>
+              ${m.approved===false ? `<button class="btn-ghost btn-ok" data-approve-motoboy="${m.id}">✓ Aprovar</button>` : ''}
+              <button class="btn-ghost ${m.blocked?'btn-ok':'btn-danger'}" data-block-motoboy="${m.id}" data-blocked="${m.blocked?'0':'1'}">${m.blocked?'Desbloquear':'Bloquear'}</button>
+            </div>
+          </div>
+          ${state.editingId===m.id ? `
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:grid;gap:8px;">
+            <input class="edit-input" data-field="name" value="${esc(m.name)}" placeholder="Nome">
+            <input class="edit-input" data-field="phone" value="${esc(m.phone||'')}" placeholder="Telefone">
+            <input class="edit-input" data-field="email" value="${esc(m.email||'')}" placeholder="E-mail">
+            <input class="edit-input" data-field="vehicle" value="${esc(m.vehicle||'')}" placeholder="Veículo">
+            <div style="display:flex;gap:8px;">
+              <button class="btn-ghost btn-ok" data-save-motoboy="${m.id}">Salvar</button>
+              <button class="btn-ghost" data-cancel-edit="1">Cancelar</button>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      `).join('') || '<p class="empty">Nenhum motoboy cadastrado ainda.</p>';
+    } else if(state.tab === 'corridas'){
+      body = (state.orders||[]).slice(0,100).map(o => `
+        <div class="row">
+          <div class="row-main">
+            <strong>#${o.id.slice(-6).toUpperCase()}</strong> · ${formatMoney(o.value)} · <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
+            <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
+            <div class="row-sub">${o.motoboyName ? '🏍️ '+esc(o.motoboyName) : 'sem motoboy ainda'}</div>
+          </div>
+        </div>
+      `).join('') || '<p class="empty">Nenhuma corrida ainda.</p>';
+    } else if(state.tab === 'relatorios'){
+      const periodBtn = (key,label) => `<button class="tab ${state.reportPeriod===key?'active':''}" data-report-period="${key}">${label}</button>`;
+      const r = state.report;
+      body = `
+        <div class="tabs" style="margin-bottom:14px;">
+          ${periodBtn('hoje','Hoje')}
+          ${periodBtn('semana','7 dias')}
+          ${periodBtn('mes','30 dias')}
+        </div>
+        ${!r ? '<p class="loading">Carregando…</p>' : `
+          <div class="grid" style="margin-bottom:16px;">
+            <div class="stat"><span class="stat-value">${r.totals.delivered}</span><span class="stat-label">Entregas concluídas</span></div>
+            <div class="stat"><span class="stat-value">${r.totals.canceled}</span><span class="stat-label">Canceladas</span></div>
+            <div class="stat"><span class="stat-value">${formatMoney(r.totals.revenue)}</span><span class="stat-label">Receita da plataforma</span></div>
+            <div class="stat"><span class="stat-value">${formatMoney(r.totals.paidToMotoboys)}</span><span class="stat-label">Pago a motoboys</span></div>
+          </div>
+          <div class="stat" style="padding:16px 12px 8px;">
+            <span class="stat-label" style="margin-bottom:8px;display:block;">Entregas por ${state.reportPeriod==='hoje'?'hora':'dia'}</span>
+            ${renderBarChart(r.series)}
+          </div>
+        `}
+      `;
+    }
+
+    return `
+      <div class="topbar">
+        <div class="brand">DESPACHO<span class="brand-tag">painel administrativo</span></div>
+        <button class="btn-ghost" id="btn-logout">Sair</button>
+      </div>
+      <div class="tabs">
+        ${tabBtn('resumo','Resumo')}
+        ${tabBtn('comercios','Comércios')}
+        ${tabBtn('motoboys','Motoboys')}
+        ${tabBtn('corridas','Corridas')}
+        ${tabBtn('relatorios','Relatórios')}
+      </div>
+      ${body}
+    `;
+  }
+
+  function render(){
+    const root = document.getElementById('root');
+    const wrap = document.createElement('div');
+    wrap.className = 'wrap';
+    wrap.innerHTML = state.screen === 'login' ? renderLogin() : renderDash();
+    root.innerHTML = '';
+    root.appendChild(wrap);
+
+    if(state.screen === 'login'){
+      const btn = document.getElementById('btn-login');
+      const input = document.getElementById('admin-password');
+      const doLogin = ()=>{
+        const pw = (input.value||'').trim();
+        if(!pw){ state.loginError='Digite a senha'; render(); return; }
+        login(pw);
+      };
+      if(btn) btn.onclick = doLogin;
+      if(input){
+        input.focus();
+        input.onkeydown = (e)=>{ if(e.key==='Enter') doLogin(); };
+      }
+    } else {
+      const logoutBtn = document.getElementById('btn-logout');
+      if(logoutBtn) logoutBtn.onclick = logout;
+      root.querySelectorAll('[data-tab]').forEach(el=>{
+        el.onclick = async ()=>{
+          state.tab = el.getAttribute('data-tab');
+          if(state.tab === 'relatorios' && !state.report){ render(); await loadReport(); }
+          render();
+        };
+      });
+      root.querySelectorAll('[data-report-period]').forEach(el=>{
+        el.onclick = async ()=>{
+          state.reportPeriod = el.getAttribute('data-report-period');
+          state.report = null;
+          render();
+          await loadReport();
+          render();
+        };
+      });
+      root.querySelectorAll('[data-block-business]').forEach(el=>{
+        el.onclick = ()=>toggleBusinessBlock(el.getAttribute('data-block-business'), el.getAttribute('data-blocked')==='1');
+      });
+      root.querySelectorAll('[data-block-motoboy]').forEach(el=>{
+        el.onclick = ()=>toggleMotoboyBlock(el.getAttribute('data-block-motoboy'), el.getAttribute('data-blocked')==='1');
+      });
+      root.querySelectorAll('[data-approve-motoboy]').forEach(el=>{
+        el.onclick = ()=>approveMotoboy(el.getAttribute('data-approve-motoboy'));
+      });
+      root.querySelectorAll('[data-edit-business]').forEach(el=>{
+        el.onclick = ()=>{ state.editingId = el.getAttribute('data-edit-business'); render(); };
+      });
+      root.querySelectorAll('[data-edit-motoboy]').forEach(el=>{
+        el.onclick = ()=>{ state.editingId = el.getAttribute('data-edit-motoboy'); render(); };
+      });
+      root.querySelectorAll('[data-cancel-edit]').forEach(el=>{
+        el.onclick = ()=>{ state.editingId = null; render(); };
+      });
+      root.querySelectorAll('[data-save-business]').forEach(el=>{
+        el.onclick = ()=>{
+          const id = el.getAttribute('data-save-business');
+          const row = el.closest('.row');
+          const data = {};
+          row.querySelectorAll('.edit-input').forEach(inp=>{ data[inp.getAttribute('data-field')] = inp.value; });
+          saveBusinessEdit(id, data);
+        };
+      });
+      root.querySelectorAll('[data-save-motoboy]').forEach(el=>{
+        el.onclick = ()=>{
+          const id = el.getAttribute('data-save-motoboy');
+          const row = el.closest('.row');
+          const data = {};
+          row.querySelectorAll('.edit-input').forEach(inp=>{ data[inp.getAttribute('data-field')] = inp.value; });
+          saveMotoboyEdit(id, data);
+        };
+      });
+    }
+  }
+
+  // ---------- init ----------
+  (async function init(){
+    if(state.token){
+      // Validate the stored token by trying to load the summary — if it's
+      // stale/expired, api() already bounces us back to the login screen.
+      state.screen = 'dash';
+      const result = await api('GET', '/api/admin/summary');
+      if(result.error){ render(); return; }
+      state.summary = result;
+      await loadAll();
+      render();
+      startPolling();
+      return;
+    }
+    render();
+  })();
+})();
+</script>
+</body>
+</html>

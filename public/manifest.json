@@ -1,0 +1,16 @@
+{
+  "name": "Despacho — Entregas por moto",
+  "short_name": "Despacho",
+  "description": "Comércio pede a corrida, motoboy aceita — despacho de entregas por moto.",
+  "start_url": "/entregas.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101215",
+  "theme_color": "#101215",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
