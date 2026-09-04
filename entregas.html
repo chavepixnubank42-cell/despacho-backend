@@ -1336,7 +1336,17 @@
       state.authToken = null;
       await setJSON('auth-token', null, false);
     }
-    setState({screen:'welcome'});
+    setState({screen: initialScreenFromLink()});
+  }
+
+  // Lets you send a link that skips the "quem está entrando" screen and
+  // goes straight to login/cadastro de um papel específico — ex.:
+  // /entregas.html?tipo=motoboy  ou  /entregas.html?tipo=comercio
+  function initialScreenFromLink(){
+    const tipo = new URLSearchParams(location.search).get('tipo');
+    if(tipo === 'motoboy') return 'login-motoboy';
+    if(tipo === 'comercio' || tipo === 'business') return 'login-business';
+    return 'welcome';
   }
 
   async function saveApiBase(url){
