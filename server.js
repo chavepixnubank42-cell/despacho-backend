@@ -3,6 +3,7 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
+const webpush = require('web-push');
 const { loadDB, saveDB } = require('./db');
 
 const app = express();
@@ -27,6 +28,73 @@ const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
 const mpToken = process.env.MERCADOPAGO_ACCESS_TOKEN || '';
 const mpClient = mpToken ? new MercadoPagoConfig({ accessToken: mpToken, options: { timeout: 8000 } }) : null;
 const mpPayment = mpClient ? new Payment(mpClient) : null;
+
+// ---------------------------------------------------------------
+// Push notifications (Web Push / VAPID) — set VAPID_PUBLIC_KEY and
+// VAPID_PRIVATE_KEY as environment variables (Railway: Variables tab).
+// Without them, push is silently disabled and the app keeps working
+// exactly as before (motoboys just rely on the in-app polling).
+// ---------------------------------------------------------------
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const pushEnabled = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+if (pushEnabled) {
+  webpush.setVapidDetails(
+    'mailto:' + (process.env.VAPID_CONTACT_EMAIL || 'contato@despacho.app'),
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — notificações push desativadas.');
+}
+
+// Sends a push notification to every device a motoboy has subscribed
+// from. Fire-and-forget on purpose — we never want a slow/failed push to
+// delay the API response the motoboy (or business) is waiting on. A
+// subscription that the browser has revoked (410/404) is removed so we
+// stop wasting calls on it.
+function notifyMotoboy(motoboyId, payload) {
+  if (!pushEnabled) return;
+  const db = loadDB();
+  const m = db.motoboys[motoboyId];
+  if (!m || !Array.isArray(m.pushSubscriptions) || m.pushSubscriptions.length === 0) return;
+  const body = JSON.stringify(payload);
+  let removedAny = false;
+  Promise.all(
+    m.pushSubscriptions.map((sub) =>
+      webpush.sendNotification(sub, body).catch((err) => {
+        if (err && (err.statusCode === 410 || err.statusCode === 404)) {
+          m.pushSubscriptions = m.pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
+          removedAny = true;
+        } else {
+          console.error('Falha ao enviar push pro motoboy', motoboyId, err && err.message);
+        }
+      })
+    )
+  ).then(() => {
+    if (removedAny) {
+      const freshDb = loadDB(); // re-read: time has passed since we started
+      const freshM = freshDb.motoboys[motoboyId];
+      if (freshM) {
+        freshM.pushSubscriptions = m.pushSubscriptions;
+        saveDB(freshDb);
+      }
+    }
+  });
+}
+
+// Notifies whoever is currently at the front of an order's offer queue —
+// called both when an order is first created and every time advanceOffer()
+// moves the offer to the next motoboy in line.
+function notifyOfferedMotoboy(db, o) {
+  if (!o.offerQueue || o.offerIndex >= o.offerQueue.length) return;
+  const motoboyId = o.offerQueue[o.offerIndex];
+  notifyMotoboy(motoboyId, {
+    title: '📦 Nova corrida disponível',
+    body: o.businessName + ' — R$ ' + Number(o.value || 0).toFixed(2),
+    data: { type: 'new-offer', orderId: o.id }
+  });
+}
 
 // ---------------------------------------------------------------
 // Geocoding (Nominatim/OpenStreetMap) — turns an address into lat/lng so
@@ -92,7 +160,7 @@ function sanitizeBusiness(b) {
 }
 function sanitizeMotoboy(m) {
   if (!m) return m;
-  const { passwordHash, ...rest } = m;
+  const { passwordHash, pushSubscriptions, ...rest } = m;
   // Always expose the EFFECTIVE status (motoboyStatus applies the forced-
   // pause override) rather than the raw stored field, so the app can't show
   // "online" while a timeout penalty is actually keeping them paused.
@@ -642,8 +710,44 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
   res.json(sanitizeMotoboy(m));
 });
 
-app.post('/api/motoboys/:id/change-password', requireAuth('motoboy'), async (req, res) => {
+app.get('/api/push/vapid-public-key', (req, res) => {
+  res.json({ enabled: pushEnabled, publicKey: VAPID_PUBLIC_KEY || null });
+});
+
+// Called by the front-end after the motoboy grants notification permission
+// and subscribes via the service worker's pushManager. One motoboy can have
+// several subscriptions (phone + tablet, or after reinstalling) — endpoint
+// is the unique key, so subscribing again with the same one just updates it.
+app.post('/api/motoboys/:id/push-subscription', requireAuth('motoboy'), (req, res) => {
   if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { subscription } = req.body || {};
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ error: 'Inscrição de notificação inválida' });
+  }
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  if (!Array.isArray(m.pushSubscriptions)) m.pushSubscriptions = [];
+  m.pushSubscriptions = m.pushSubscriptions.filter((s) => s.endpoint !== subscription.endpoint);
+  m.pushSubscriptions.push(subscription);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Called when the motoboy turns notifications off (or the app wants to
+// clean up before unregistering) — removes just this device's subscription.
+app.delete('/api/motoboys/:id/push-subscription', requireAuth('motoboy'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { endpoint } = req.body || {};
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.pushSubscriptions = (m.pushSubscriptions || []).filter((s) => s.endpoint !== endpoint);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.post('/api/motoboys/:id/change-password', requireAuth('motoboy'), async (req, res) => {
   const { currentPassword, newPassword, confirmPassword } = req.body || {};
   if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Preencha todos os campos' });
   if (newPassword !== confirmPassword) return res.status(400).json({ error: 'As senhas não coincidem' });
@@ -968,6 +1072,7 @@ function advanceOffer(db, o) {
     o.declinedBy = []; // fresh round — everyone gets asked again
   }
   o.offeredAt = o.offerQueue.length > 0 ? Date.now() : null;
+  notifyOfferedMotoboy(db, o);
 }
 
 function isOfferedTo(o, motoboyId) {
@@ -1047,6 +1152,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   freshDb.orders[order.id] = order;
   addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
   saveDB(freshDb);
+  notifyOfferedMotoboy(freshDb, order);
   res.json(order);
 });
 
