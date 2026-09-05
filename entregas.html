@@ -1586,6 +1586,7 @@
   const OFFER_TIMEOUT_MS = 30 * 1000; // must match OFFER_TIMEOUT_MS on the server — used here only to draw the countdown
   const PICKUP_WINDOW_MS = 16 * 60 * 1000; // 16 minutes for each leg (to pickup, and to delivery)
   const ARRIVAL_RADIUS_METERS = 150; // must match ARRIVAL_RADIUS_METERS on the server
+  const MAX_ACCURACY_ALLOWANCE_METERS = 350; // must match MAX_ACCURACY_ALLOWANCE_METERS on the server
 
   function haversineMeters(lat1,lng1,lat2,lng2){
     const R = 6371000;
@@ -3246,12 +3247,18 @@
         if(btn) btn.disabled = true;
       } else {
         const dist = Math.round(haversineMeters(liveGeo.lat, liveGeo.lng, lat, lng));
-        if(dist <= ARRIVAL_RADIUS_METERS){
+        // Mirror the server's tolerance: the confirm-arrival endpoint accepts
+        // up to ARRIVAL_RADIUS_METERS + the device's own reported accuracy
+        // (capped) — a phone with a rough GPS fix would otherwise show the
+        // button as disabled here even though the server would accept it.
+        const accuracyAllowance = Math.min(typeof liveGeo.acc === 'number' ? liveGeo.acc : 0, MAX_ACCURACY_ALLOWANCE_METERS);
+        const effectiveRadius = ARRIVAL_RADIUS_METERS + accuracyAllowance;
+        if(dist <= effectiveRadius){
           distEl.innerHTML = '✅ Você está perto (' + dist + 'm) — pode confirmar';
           gpsLock.classList.add('is-close');
           if(btn) btn.disabled = false;
         } else {
-          distEl.innerHTML = '📍 Você está a <strong>' + dist + 'm</strong> — chegue a menos de ' + ARRIVAL_RADIUS_METERS + 'm para confirmar';
+          distEl.innerHTML = '📍 Você está a <strong>' + dist + 'm</strong> — chegue a menos de ' + effectiveRadius + 'm para confirmar' + (accuracyAllowance > 0 ? ' <span style="opacity:.7">(seu GPS está com ' + Math.round(liveGeo.acc) + 'm de precisão)</span>' : '');
           gpsLock.classList.remove('is-close');
           if(btn) btn.disabled = true;
         }
