@@ -3,20 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Despacho — Entregas por moto</title>
+<title>ChegouJá — Entregas por moto</title>
 
 <!-- PWA: makes it installable with an icon and full-screen (no browser bar) -->
 <meta name="theme-color" content="#101215">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Despacho">
+<meta name="apple-mobile-web-app-title" content="ChegouJá">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="manifest" href="/manifest.json">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Leaflet: free map + draggable pin for confirming exact pickup location.
+     Uses OpenStreetMap tiles — no API key/billing needed. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root{
     --bg:#101215;
@@ -1261,7 +1266,7 @@
   // ---------- state ----------
   let state = {
     screen: 'loading', // loading, setup, welcome, login-business, register-business, complete-business, login-motoboy, register-motoboy, complete-motoboy, business-dash, motoboy-dash
-    apiBase: '', // URL of your backend, e.g. https://despacho-api.up.railway.app
+    apiBase: '', // URL of your backend, e.g. https://chegoja-api.up.railway.app
     apiOk: null, // null=checking, true=reachable, false=couldn't reach the server
     isOffline: (typeof navigator !== 'undefined' && 'onLine' in navigator) ? !navigator.onLine : false,
     authToken: null, // session token from login/register — sent as Authorization: Bearer <token>
@@ -1428,7 +1433,7 @@
     pollHandle = setInterval(async ()=>{
       // Don't disrupt any open form/sheet — re-rendering while the person
       // is typing would reset the field and make it look like it's blinking.
-      if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal) return;
+      if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker) return;
       await refreshOrders();
       render();
     }, 3000);
@@ -1583,30 +1588,128 @@
     if(newStatus === 'online') ensurePushSubscription();
   }
 
-  // ---------- Localização exata do comércio ----------
+  // ---------- Localização exata do comércio (mapa com pino arrastável) ----------
   // Geocodificar o endereço digitado (Nominatim/OpenStreetMap) só chega
   // perto do lugar certo — em ruas menores ou endereços incompletos pode
   // errar por centenas de metros, porque o serviço está adivinhando a
-  // partir do texto, não medindo nada de verdade. Aqui a gente usa o GPS
-  // de verdade do celular, com o comerciante fisicamente parado na loja,
-  // e essa coordenada passa a ter prioridade sobre a adivinhação do
-  // endereço na hora de calcular a distância do motoboy até a retirada.
-  function markBusinessLocation(){
-    if(!navigator.geolocation){ showToast('Seu navegador não suporta localização'); return; }
-    showToast('Obtendo sua localização exata...');
-    navigator.geolocation.getCurrentPosition(
-      async (pos)=>{
-        const lat = pos.coords.latitude, lng = pos.coords.longitude;
-        const result = await apiPatch('/api/businesses/'+state.myId+'/location', {lat, lng});
-        if(result && result.error){ showToast(result.error); return; }
-        state.profile = Object.assign({}, state.profile, {preciseCoords:{lat,lng}});
-        showToast('✅ Localização exata salva — o motoboy agora mede a distância a partir daqui');
-        render();
-      },
-      (err)=>{ showToast('Não foi possível pegar sua localização — verifique a permissão de GPS do navegador'); },
-      {enableHighAccuracy:true, maximumAge:0, timeout:15000}
-    );
+  // partir do texto, não medindo nada de verdade.
+  //
+  // Só confiar numa leitura crua do GPS também não resolve sozinho: um
+  // único fix pode vir ruim (prédio, sinal fraco, GPS "frio"). É por isso
+  // que apps como Uber/iFood pedem pro estabelecimento CONFIRMAR
+  // visualmente num mapa, arrastando um pino — uma pessoa olhando o mapa
+  // corrige o erro do sensor na hora, o que nenhuma leitura sozinha faz.
+  // Aqui usamos o GPS só como ponto de partida do mapa; quem decide onde
+  // fica o pino de verdade é o comerciante, olhando o mapa.
+  let locationPickerMap = null, locationPickerMarker = null;
+
+  function openLocationPicker(){
+    state.showLocationPicker = true;
+    state.locationPickerCoords = (state.profile && state.profile.preciseCoords) || null;
+    render();
+    // GPS só pra centralizar o mapa num ponto próximo — não é a resposta final.
+    if(!state.locationPickerCoords && navigator.geolocation){
+      navigator.geolocation.getCurrentPosition(
+        (pos)=>{
+          if(locationPickerMap){
+            const c = [pos.coords.latitude, pos.coords.longitude];
+            locationPickerMap.setView(c, 17);
+            locationPickerMarker.setLatLng(c);
+          }
+        },
+        ()=>{ /* sem GPS disponível — a pessoa arrasta o mapa manualmente até achar o lugar */ },
+        {enableHighAccuracy:true, maximumAge:0, timeout:10000}
+      );
+    }
   }
+
+  function closeLocationPicker(){
+    state.showLocationPicker = false;
+    locationPickerMap = null;
+    locationPickerMarker = null;
+    render();
+  }
+
+  function initLocationPickerMap(){
+    if(typeof L === 'undefined') return; // Leaflet ainda não carregou (sem internet?)
+    const start = state.locationPickerCoords || {lat:-14.235, lng:-51.9253}; // centro do Brasil, se nada melhor
+    const zoom = state.locationPickerCoords ? 17 : 4;
+    locationPickerMap = L.map('location-picker-map', {attributionControl:false}).setView([start.lat, start.lng], zoom);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(locationPickerMap);
+    locationPickerMarker = L.marker([start.lat, start.lng], {draggable:true}).addTo(locationPickerMap);
+    locationPickerMap.on('click', (e)=>{ locationPickerMarker.setLatLng(e.latlng); });
+    setTimeout(()=>{ if(locationPickerMap) locationPickerMap.invalidateSize(); }, 50);
+  }
+
+  async function saveLocationPicker(){
+    if(!locationPickerMarker) return;
+    const {lat, lng} = locationPickerMarker.getLatLng();
+    const result = await apiPatch('/api/businesses/'+state.myId+'/location', {lat, lng});
+    if(result && result.error){ showToast(result.error); return; }
+    state.profile = Object.assign({}, state.profile, {preciseCoords:{lat,lng}});
+    closeLocationPicker();
+    showToast('✅ Localização exata salva — o motoboy agora mede a distância a partir daqui');
+  }
+
+  function renderLocationPickerModal(){
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.id = 'location-picker-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal-sheet">
+        <div class="modal-head">
+          <span class="modal-title">📍 Marcar localização exata</span>
+          <button class="modal-close" id="location-picker-close">✕</button>
+        </div>
+        <p class="page-sub" style="margin-bottom:12px;">Arraste o pino (ou toque no mapa) até a porta da sua loja. Isso é mais confiável que o GPS sozinho — o motoboy vai medir a distância de chegada a partir daqui.</p>
+        <div style="position:relative;margin-bottom:10px;">
+          <input type="text" id="location-picker-search" placeholder="Buscar endereço ou ponto de referência..." autocomplete="off"
+                 style="width:100%;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--border);color:var(--text);font-size:14px;">
+          <div id="location-picker-results" style="position:absolute;top:100%;left:0;right:0;z-index:1000;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;margin-top:4px;overflow:hidden;display:none;"></div>
+        </div>
+        <div id="location-picker-map" style="width:100%;height:320px;border-radius:12px;overflow:hidden;border:1px solid var(--border);"></div>
+        <div style="display:flex;gap:10px;margin-top:14px;">
+          <button type="button" class="btn-secondary" id="location-picker-cancel" style="flex:1;">Cancelar</button>
+          <button type="button" class="btn-primary" id="location-picker-save" style="flex:1;">Salvar localização</button>
+        </div>
+      </div>
+    `;
+    return backdrop;
+  }
+
+  // Busca endereço (com debounce) e mostra as opções em baixo do campo —
+  // clicar numa opção só centraliza o mapa e move o pino ali; o ajuste
+  // fino continua sendo arrastar o pino, já que a busca de endereço tem
+  // o mesmo limite de precisão discutido acima.
+  let locationSearchTimer = null;
+  function onLocationSearchInput(e){
+    const q = e.target.value;
+    clearTimeout(locationSearchTimer);
+    const resultsEl = document.getElementById('location-picker-results');
+    if(!q || q.trim().length < 3){ if(resultsEl){ resultsEl.style.display='none'; resultsEl.innerHTML=''; } return; }
+    locationSearchTimer = setTimeout(async ()=>{
+      const data = await apiGet('/api/geocode-search?q=' + encodeURIComponent(q));
+      const results = (data && data.results) || [];
+      if(!resultsEl) return;
+      if(!results.length){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
+      resultsEl.innerHTML = results.map((r,i) => `<div class="location-search-item" data-idx="${i}" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);">${esc(r.label)}</div>`).join('');
+      resultsEl.style.display = 'block';
+      resultsEl.querySelectorAll('.location-search-item').forEach(el=>{
+        el.onclick = ()=>{
+          const r = results[parseInt(el.getAttribute('data-idx'),10)];
+          if(locationPickerMap && locationPickerMarker){
+            locationPickerMap.setView([r.lat, r.lng], 17);
+            locationPickerMarker.setLatLng([r.lat, r.lng]);
+          }
+          resultsEl.style.display = 'none';
+          resultsEl.innerHTML = '';
+          const input = document.getElementById('location-picker-search');
+          if(input) input.value = r.label;
+        };
+      });
+    }, 400);
+  }
+
   // Subscribes this device to receive push notifications (new ride offers)
   // even with the phone locked or the app in the background. Only makes
   // sense once the motoboy is online, so we call this from setMotoboyStatus
@@ -1749,7 +1852,10 @@
 
   async function arriveAtPickup(orderId){
     const result = await apiPost('/api/orders/'+orderId+'/arrive-pickup', {geo: liveGeo});
-    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    if(result.error){
+      await handleArrivalBlocked(result, orderId, 'arrive-pickup', arriveAtPickup);
+      return;
+    }
     stopGeoWatch();
     await refreshOrders();
     render();
@@ -1766,11 +1872,33 @@
 
   async function arriveAtDelivery(orderId){
     const result = await apiPost('/api/orders/'+orderId+'/arrive-delivery', {geo: liveGeo});
-    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    if(result.error){
+      await handleArrivalBlocked(result, orderId, 'arrive-delivery', arriveAtDelivery);
+      return;
+    }
     stopGeoWatch();
     await refreshOrders();
     render();
     showToast('Chegada no destino registrada — confirme a entrega');
+  }
+
+  // Se o servidor bloqueou por distância (GPS impreciso), oferece confirmar
+  // mesmo assim — igual Uber/iFood fazem, em vez de travar uma entrega
+  // legítima só porque o sensor teve uma leitura ruim naquele momento.
+  // Fica registrado no pedido pra conferência do admin depois.
+  async function handleArrivalBlocked(result, orderId, path, retryFn){
+    if(result.canOverride && confirm(result.error + '\n\nSe você já está no local e o problema é só o GPS, pode confirmar mesmo assim. Confirmar chegada?')){
+      const result2 = await apiPost('/api/orders/'+orderId+'/'+path, {geo: liveGeo, override:true});
+      if(result2.error){ showToast(result2.error); await refreshOrders(); render(); return; }
+      stopGeoWatch();
+      await refreshOrders();
+      render();
+      showToast('Chegada confirmada manualmente — registrado para conferência');
+      return;
+    }
+    showToast(result.error);
+    await refreshOrders();
+    render();
   }
 
   async function markDelivered(orderId){
@@ -1919,6 +2047,10 @@
     if(state.rateModal){
       root.appendChild(renderRateModal());
     }
+    if(state.showLocationPicker){
+      root.appendChild(renderLocationPickerModal());
+      initLocationPickerMap();
+    }
     if(state.toast){
       const t = document.createElement('div');
       t.className='toast';
@@ -1944,7 +2076,7 @@
     }
     bar.innerHTML = `
       <div class="brand">
-        <span class="brand-mark">DESPACHO</span>
+        <span class="brand-mark">CHEGOJÁ</span>
         <span class="brand-tag">entregas por moto</span>
       </div>
       <div class="topbar-right">${right}</div>
@@ -2429,7 +2561,7 @@
       <p class="page-sub" style="font-family:var(--font-mono);font-size:12px;">📍 ${esc(state.profile.address)}</p>
       <p class="page-sub" style="font-size:12px;margin-top:-8px;">
         ${state.profile.preciseCoords
-          ? '✅ Localização exata marcada — a distância do motoboy é medida a partir dela'
+          ? '✅ Localização exata marcada — <button id="btn-mark-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>'
           : '⚠️ Localização aproximada (baseada no endereço digitado) — <button id="btn-mark-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar localização exata</button>'}
       </p>
       <div style="margin-bottom:16px;">${ratingBadgeHtml()}</div>
@@ -3058,7 +3190,7 @@
     const btnOpenTopup = $('#btn-open-topup');
     if(btnOpenTopup) btnOpenTopup.onclick = ()=>{ state.showTopup=true; state.topupPix=null; render(); };
     const btnMarkLocation = $('#btn-mark-location');
-    if(btnMarkLocation) btnMarkLocation.onclick = markBusinessLocation;
+    if(btnMarkLocation) btnMarkLocation.onclick = openLocationPicker;
     const btnOpenStatement = $('#btn-open-statement');
     if(btnOpenStatement) btnOpenStatement.onclick = openStatement;
 
@@ -3082,6 +3214,17 @@
     if(topupClose) topupClose.onclick = closeTopup;
     const topupBackdrop = $('#topup-backdrop');
     if(topupBackdrop) topupBackdrop.onclick = (e)=>{ if(e.target===topupBackdrop) closeTopup(); };
+
+    const locationPickerClose = $('#location-picker-close');
+    if(locationPickerClose) locationPickerClose.onclick = closeLocationPicker;
+    const locationPickerCancel = $('#location-picker-cancel');
+    if(locationPickerCancel) locationPickerCancel.onclick = closeLocationPicker;
+    const locationPickerSave = $('#location-picker-save');
+    if(locationPickerSave) locationPickerSave.onclick = saveLocationPicker;
+    const locationPickerBackdrop = $('#location-picker-backdrop');
+    if(locationPickerBackdrop) locationPickerBackdrop.onclick = (e)=>{ if(e.target===locationPickerBackdrop) closeLocationPicker(); };
+    const locationPickerSearch = $('#location-picker-search');
+    if(locationPickerSearch) locationPickerSearch.oninput = onLocationSearchInput;
 
     const btnGeneratePix = $('#btn-generate-pix');
     if(btnGeneratePix) btnGeneratePix.onclick = ()=>{
@@ -3345,7 +3488,7 @@
   // Mobile browsers throttle background tabs — catch up the moment the
   // app becomes visible/foreground again instead of waiting for the next tick.
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState === 'visible' && state.profile && !(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal)){
+    if(document.visibilityState === 'visible' && state.profile && !(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker)){
       refreshOrders().then(render);
     }
   });

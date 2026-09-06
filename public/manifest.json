@@ -1,7 +1,7 @@
 {
-  "name": "Despacho — Entregas por moto",
-  "short_name": "Despacho",
-  "description": "Comércio pede a corrida, motoboy aceita — despacho de entregas por moto.",
+  "name": "ChegouJá — Entregas por moto",
+  "short_name": "ChegouJá",
+  "description": "Comércio pede a corrida, motoboy aceita — entregas por moto.",
   "start_url": "/entregas.html",
   "scope": "/",
   "display": "standalone",

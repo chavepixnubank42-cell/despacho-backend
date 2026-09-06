@@ -40,7 +40,7 @@ const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const pushEnabled = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 if (pushEnabled) {
   webpush.setVapidDetails(
-    'mailto:' + (process.env.VAPID_CONTACT_EMAIL || 'contato@despacho.app'),
+    'mailto:' + (process.env.VAPID_CONTACT_EMAIL || 'contato@chegoja.app'),
     VAPID_PUBLIC_KEY,
     VAPID_PRIVATE_KEY
   );
@@ -124,7 +124,7 @@ async function geocodeAddress(address) {
   try {
     const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(address);
     const res = await throttledFetch(url, {
-      headers: { 'User-Agent': 'DespachoApp/1.0 (app de despacho de entregas por moto)' }
+      headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
     });
     const data = await res.json();
     const coords = data && data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null;
@@ -137,6 +137,26 @@ async function geocodeAddress(address) {
     console.error('Geocoding falhou para', address, e.message);
     return null;
   }
+}
+
+// Like geocodeAddress, but for the interactive search box on the map pin
+// picker: returns a handful of candidate matches (with display names) so
+// the person can pick the right one and then fine-tune it by dragging the
+// pin themselves — this is a starting point for the map, not cached,
+// since it's a one-off interactive lookup rather than something reused
+// every time an order is created.
+async function geocodeSearch(query) {
+  if (!query || !query.trim()) return [];
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=br&q=' + encodeURIComponent(query);
+  const res = await throttledFetch(url, {
+    headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
+  });
+  const data = await res.json();
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    label: r.display_name,
+    lat: parseFloat(r.lat),
+    lng: parseFloat(r.lon)
+  }));
 }
 
 function distanceMeters(lat1, lng1, lat2, lng2) {
@@ -566,14 +586,28 @@ app.patch('/api/businesses/:id', requireAuth('business'), (req, res) => {
   res.json(sanitizeBusiness(b));
 });
 
+// Powers the search box on the map pin picker (see /public + entregas.html) —
+// looks up a handful of candidate addresses so the person can jump the map
+// there instead of panning around manually to find their street.
+app.get('/api/geocode-search', requireAuth('business'), async (req, res) => {
+  const q = (req.query.q || '').toString();
+  if (!q.trim()) return res.json({ results: [] });
+  try {
+    const results = await geocodeSearch(q);
+    res.json({ results });
+  } catch (e) {
+    console.error('Busca de endereço falhou para', q, e.message);
+    res.json({ results: [] });
+  }
+});
+
 // Lets a business overwrite the geocoded guess with the real GPS position
 // of their shop — captured with the phone physically there. Nominatim
 // (free, address-text-based geocoding) can be off by hundreds of meters,
 // especially on smaller streets or incomplete addresses; an actual GPS fix
 // taken on-site is ground truth and takes priority everywhere pickup
 // distance is calculated.
-app.patch('/api/businesses/:id/location', requireAuth('business'), (req, res) => {
-  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+app.patch('/api/businesses/:id/location', requireAuth('business'), (req, res) => {  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
   const { lat, lng } = req.body || {};
   if (typeof lat !== 'number' || typeof lng !== 'number' || Number.isNaN(lat) || Number.isNaN(lng)) {
     return res.status(400).json({ error: 'Localização inválida' });
@@ -989,7 +1023,7 @@ app.post('/api/businesses/:id/topup', requireAuth('business'), async (req, res) 
     const mpRes = await mpPayment.create({
       body: {
         transaction_amount: value,
-        description: 'Créditos Despacho — ' + business.name,
+        description: 'Créditos ChegouJá — ' + business.name,
         payment_method_id: 'pix',
         payer
       }
@@ -1375,10 +1409,22 @@ function arrivalTransition(fromStatus, toStatus, coordsField, extraFields) {
       const accuracyAllowance = Math.min(typeof geo.acc === 'number' ? geo.acc : 0, MAX_ACCURACY_ALLOWANCE_METERS);
       const effectiveRadius = ARRIVAL_RADIUS_METERS + accuracyAllowance;
       if (dist > effectiveRadius) {
-        return res.status(409).json({
-          error: `Você está a ${dist}m do endereço — chegue mais perto (até ${effectiveRadius}m, considerando a precisão do seu GPS) para confirmar.`,
-          distance: dist
-        });
+        // Real apps (Uber, iFood...) don't hard-block a delivery just
+        // because a sensor reading looked off — a GPS chip having a bad
+        // moment shouldn't be able to strand a legitimately-arrived
+        // motoboy. So after the normal check fails once, the app offers
+        // "confirmar mesmo assim" — which comes back here as
+        // override:true. We allow it, but log exactly how far off it
+        // was so admin can review anything that looks abusive later.
+        if (!req.body.override) {
+          return res.status(409).json({
+            error: `Você está a ${dist}m do endereço — chegue mais perto (até ${effectiveRadius}m, considerando a precisão do seu GPS) para confirmar.`,
+            distance: dist,
+            canOverride: true
+          });
+        }
+        o.arrivalOverrides = o.arrivalOverrides || [];
+        o.arrivalOverrides.push({ field: coordsField, distance: dist, effectiveRadius, at: Date.now() });
       }
     }
     // No coordinates for this address at all (geocoding never found it) —
@@ -1574,7 +1620,7 @@ app.get('/entregas.html', (req, res) => res.sendFile(path.join(__dirname, 'entre
 // the operation just needs to know/bookmark this address directly.
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
-app.get('/api', (req, res) => res.send('Despacho API rodando ✅'));
+app.get('/api', (req, res) => res.send('ChegouJá API rodando ✅'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Despacho API na porta ' + PORT));
+app.listen(PORT, () => console.log('ChegouJá API na porta ' + PORT));

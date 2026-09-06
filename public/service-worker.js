@@ -1,4 +1,4 @@
-// Despacho — service worker
+// ChegouJá — service worker
 //
 // Registered from a real, stable URL (/service-worker.js), not a Blob.
 // Blob-registered service workers are rejected by Chrome and Firefox per
@@ -52,9 +52,9 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('push', (event) => {
   if (!event.data) return;
   let payload = {};
-  try { payload = event.data.json(); } catch (e) { payload = { title: 'Despacho', body: event.data.text() }; }
+  try { payload = event.data.json(); } catch (e) { payload = { title: 'ChegouJá', body: event.data.text() }; }
   event.waitUntil(
-    self.registration.showNotification(payload.title || 'Despacho', {
+    self.registration.showNotification(payload.title || 'ChegouJá', {
       body: payload.body || '',
       icon: '/icon.svg',
       badge: '/icon.svg',

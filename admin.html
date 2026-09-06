@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Despacho — Painel administrativo</title>
+<title>ChegouJá — Painel administrativo</title>
 <style>
   :root{
     --bg:#0B0B0F;
@@ -261,7 +261,7 @@
 
   function renderLogin(){
     return `
-      <p class="eyebrow">Despacho</p>
+      <p class="eyebrow">ChegouJá</p>
       <h1>Painel administrativo</h1>
       <div class="field">
         <label>Senha de administrador</label>
@@ -374,6 +374,7 @@
         <div class="row">
           <div class="row-main">
             <strong>#${o.id.slice(-6).toUpperCase()}</strong> · ${formatMoney(o.value)} · <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
+            ${o.arrivalOverrides && o.arrivalOverrides.length ? '<span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ chegada forçada (GPS)</span>' : ''}
             <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
             <div class="row-sub">${o.motoboyName ? '🏍️ '+esc(o.motoboyName) : 'sem motoboy ainda'}</div>
           </div>
@@ -405,7 +406,7 @@
 
     return `
       <div class="topbar">
-        <div class="brand">DESPACHO<span class="brand-tag">painel administrativo</span></div>
+        <div class="brand">CHEGOJÁ<span class="brand-tag">painel administrativo</span></div>
         <button class="btn-ghost" id="btn-logout">Sair</button>
       </div>
       <div class="tabs">

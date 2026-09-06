@@ -1,4 +1,4 @@
-# Despacho — Backend
+# ChegouJá — Backend
 
 API que substitui o `window.storage` do protótipo, pra funcionar fora do Claude,
 em qualquer celular, a qualquer hora.
@@ -25,7 +25,7 @@ npm start
 ```
 
 Isso sobe a API em `http://localhost:3000`. Abrindo esse endereço no navegador
-deve aparecer "Despacho API rodando ✅".
+deve aparecer "ChegouJá API rodando ✅".
 
 ## Rotas disponíveis
 
@@ -74,7 +74,7 @@ Passo geral (vale pros três):
 1. Sobe essa pasta pra um repositório no GitHub.
 2. Cria uma conta no serviço escolhido e conecta esse repositório.
 3. Ele vai rodar `npm install` e `npm start` sozinho.
-4. Você recebe uma URL pública, tipo `https://despacho-api.up.railway.app`.
+4. Você recebe uma URL pública, tipo `https://chegoja-api.up.railway.app`.
 
 ⚠️ **Atenção ao `data.json`:** em alguns serviços gratuitos, o sistema de
 arquivos é apagado a cada novo deploy/reinício. Pra não perder os dados,
