@@ -31,7 +31,15 @@
 const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'data.json');
+// DATA_DIR lets you point data.json at a persistent disk instead of the
+// app's own folder. This matters on Railway (and most hosts): every new
+// deploy builds a fresh container from what's in GitHub, which does NOT
+// include data.json (it's generated at runtime) — so without a
+// persistent volume, businesses/motoboys/credits get wiped on every
+// deploy. Set DATA_DIR to a Railway Volume's mount path (e.g. /data) to
+// fix that. Defaults to this folder so nothing changes for local use.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const DB_PATH = path.join(DATA_DIR, 'data.json');
 const TMP_PATH = DB_PATH + '.tmp';
 const BAK_PATH = DB_PATH + '.bak';
 
