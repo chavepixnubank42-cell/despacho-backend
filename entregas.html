@@ -1583,7 +1583,30 @@
     if(newStatus === 'online') ensurePushSubscription();
   }
 
-  // ---------- Push notifications ----------
+  // ---------- Localização exata do comércio ----------
+  // Geocodificar o endereço digitado (Nominatim/OpenStreetMap) só chega
+  // perto do lugar certo — em ruas menores ou endereços incompletos pode
+  // errar por centenas de metros, porque o serviço está adivinhando a
+  // partir do texto, não medindo nada de verdade. Aqui a gente usa o GPS
+  // de verdade do celular, com o comerciante fisicamente parado na loja,
+  // e essa coordenada passa a ter prioridade sobre a adivinhação do
+  // endereço na hora de calcular a distância do motoboy até a retirada.
+  function markBusinessLocation(){
+    if(!navigator.geolocation){ showToast('Seu navegador não suporta localização'); return; }
+    showToast('Obtendo sua localização exata...');
+    navigator.geolocation.getCurrentPosition(
+      async (pos)=>{
+        const lat = pos.coords.latitude, lng = pos.coords.longitude;
+        const result = await apiPatch('/api/businesses/'+state.myId+'/location', {lat, lng});
+        if(result && result.error){ showToast(result.error); return; }
+        state.profile = Object.assign({}, state.profile, {preciseCoords:{lat,lng}});
+        showToast('✅ Localização exata salva — o motoboy agora mede a distância a partir daqui');
+        render();
+      },
+      (err)=>{ showToast('Não foi possível pegar sua localização — verifique a permissão de GPS do navegador'); },
+      {enableHighAccuracy:true, maximumAge:0, timeout:15000}
+    );
+  }
   // Subscribes this device to receive push notifications (new ride offers)
   // even with the phone locked or the app in the background. Only makes
   // sense once the motoboy is online, so we call this from setMotoboyStatus
@@ -2404,6 +2427,11 @@
       <p class="eyebrow">Painel do comércio</p>
       <h1 class="page-title">${esc(state.profile.name)}</h1>
       <p class="page-sub" style="font-family:var(--font-mono);font-size:12px;">📍 ${esc(state.profile.address)}</p>
+      <p class="page-sub" style="font-size:12px;margin-top:-8px;">
+        ${state.profile.preciseCoords
+          ? '✅ Localização exata marcada — a distância do motoboy é medida a partir dela'
+          : '⚠️ Localização aproximada (baseada no endereço digitado) — <button id="btn-mark-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar localização exata</button>'}
+      </p>
       <div style="margin-bottom:16px;">${ratingBadgeHtml()}</div>
       <div class="credit-card ${credits<=0?'is-empty':''}">
         <div class="credit-label">Créditos disponíveis (1 crédito = 1 entrega)</div>
@@ -3029,6 +3057,8 @@
 
     const btnOpenTopup = $('#btn-open-topup');
     if(btnOpenTopup) btnOpenTopup.onclick = ()=>{ state.showTopup=true; state.topupPix=null; render(); };
+    const btnMarkLocation = $('#btn-mark-location');
+    if(btnMarkLocation) btnMarkLocation.onclick = markBusinessLocation;
     const btnOpenStatement = $('#btn-open-statement');
     if(btnOpenStatement) btnOpenStatement.onclick = openStatement;
 

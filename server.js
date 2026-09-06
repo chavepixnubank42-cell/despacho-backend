@@ -513,7 +513,11 @@ app.patch('/api/businesses/:id', requireAuth('business'), (req, res) => {
 
   if (typeof req.body.name === 'string' && req.body.name.trim()) b.name = req.body.name.trim();
   if (typeof req.body.phone === 'string' && req.body.phone.trim()) b.phone = req.body.phone.trim();
-  if (typeof req.body.address === 'string' && req.body.address.trim()) b.address = req.body.address.trim();
+  if (typeof req.body.address === 'string' && req.body.address.trim()) {
+    const newAddress = req.body.address.trim();
+    if (newAddress !== b.address) b.preciseCoords = null; // old GPS pin no longer matches the new address
+    b.address = newAddress;
+  }
   if (typeof req.body.email === 'string' && req.body.email.trim()) {
     const emailLower = req.body.email.trim().toLowerCase();
     const taken = Object.values(db.businesses).some((x) => x.id !== b.id && (x.email || '').toLowerCase() === emailLower);
@@ -521,6 +525,26 @@ app.patch('/api/businesses/:id', requireAuth('business'), (req, res) => {
     b.email = emailLower;
   }
 
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+// Lets a business overwrite the geocoded guess with the real GPS position
+// of their shop — captured with the phone physically there. Nominatim
+// (free, address-text-based geocoding) can be off by hundreds of meters,
+// especially on smaller streets or incomplete addresses; an actual GPS fix
+// taken on-site is ground truth and takes priority everywhere pickup
+// distance is calculated.
+app.patch('/api/businesses/:id/location', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { lat, lng } = req.body || {};
+  if (typeof lat !== 'number' || typeof lng !== 'number' || Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: 'Localização inválida' });
+  }
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  b.preciseCoords = { lat, lng };
   saveDB(db);
   res.json(sanitizeBusiness(b));
 });
@@ -1105,7 +1129,13 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   // Geocode both addresses so we can later enforce the GPS arrival lock,
   // and so the offer queue below can prioritize the nearest motoboy.
   // Sequential on purpose — keeps us within Nominatim's rate limit.
-  const pickupCoords = await geocodeAddress(pickupAddress);
+  //
+  // If the pickup address matches the business's own registered address
+  // AND they've marked their exact GPS location (see PATCH .../location),
+  // use that instead of geocoding — a real on-site GPS fix beats guessing
+  // coordinates from an address string every time.
+  const usePreciseForPickup = business.preciseCoords && pickupAddress.trim() === (business.address || '').trim();
+  const pickupCoords = usePreciseForPickup ? business.preciseCoords : await geocodeAddress(pickupAddress);
   const deliveryCoords = await geocodeAddress(deliveryAddress);
 
   // Built AFTER geocoding so it can sort candidates by real distance to
