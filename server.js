@@ -10,7 +10,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
+const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega', 'retornando', 'no_local_retorno'];
+// Once the motoboy has departed the pickup with the package in hand
+// ('em_entrega' onward), canceling no longer makes sense for either side —
+// the package is already physically out for delivery. Before that point
+// (still heading to or waiting at the pickup) canceling is still fine.
+const CANCELABLE_STATUSES = ['pendente', 'aceito', 'no_local_retirada'];
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
 const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
 // GPS accuracy varies a lot by device (a laptop or a phone with a weak
@@ -48,39 +53,45 @@ if (pushEnabled) {
   console.warn('VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — notificações push desativadas.');
 }
 
-// Sends a push notification to every device a motoboy has subscribed
-// from. Fire-and-forget on purpose — we never want a slow/failed push to
-// delay the API response the motoboy (or business) is waiting on. A
-// subscription that the browser has revoked (410/404) is removed so we
-// stop wasting calls on it.
-function notifyMotoboy(motoboyId, payload) {
+// Sends a push notification to every device subscribed for a given
+// business or motoboy record. Fire-and-forget on purpose — we never want
+// a slow/failed push to delay the API response the caller is waiting on.
+// A subscription the browser has revoked (410/404) is removed so we stop
+// wasting calls on it.
+function notifyEntity(collectionName, id, payload) {
   if (!pushEnabled) return;
   const db = loadDB();
-  const m = db.motoboys[motoboyId];
-  if (!m || !Array.isArray(m.pushSubscriptions) || m.pushSubscriptions.length === 0) return;
+  const entity = db[collectionName][id];
+  if (!entity || !Array.isArray(entity.pushSubscriptions) || entity.pushSubscriptions.length === 0) return;
   const body = JSON.stringify(payload);
   let removedAny = false;
   Promise.all(
-    m.pushSubscriptions.map((sub) =>
+    entity.pushSubscriptions.map((sub) =>
       webpush.sendNotification(sub, body).catch((err) => {
         if (err && (err.statusCode === 410 || err.statusCode === 404)) {
-          m.pushSubscriptions = m.pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
+          entity.pushSubscriptions = entity.pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
           removedAny = true;
         } else {
-          console.error('Falha ao enviar push pro motoboy', motoboyId, err && err.message);
+          console.error('Falha ao enviar push (' + collectionName + ')', id, err && err.message);
         }
       })
     )
   ).then(() => {
     if (removedAny) {
       const freshDb = loadDB(); // re-read: time has passed since we started
-      const freshM = freshDb.motoboys[motoboyId];
-      if (freshM) {
-        freshM.pushSubscriptions = m.pushSubscriptions;
+      const freshEntity = freshDb[collectionName][id];
+      if (freshEntity) {
+        freshEntity.pushSubscriptions = entity.pushSubscriptions;
         saveDB(freshDb);
       }
     }
   });
+}
+function notifyMotoboy(motoboyId, payload) {
+  notifyEntity('motoboys', motoboyId, payload);
+}
+function notifyBusiness(businessId, payload) {
+  notifyEntity('businesses', businessId, payload);
 }
 
 // Notifies whoever is currently at the front of an order's offer queue —
@@ -175,7 +186,7 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
 // ---------------------------------------------------------------
 function sanitizeBusiness(b) {
   if (!b) return b;
-  const { passwordHash, ...rest } = b;
+  const { passwordHash, pushSubscriptions, ...rest } = b;
   return rest;
 }
 function sanitizeMotoboy(m) {
@@ -618,6 +629,36 @@ app.patch('/api/businesses/:id/location', requireAuth('business'), (req, res) =>
   b.preciseCoords = { lat, lng };
   saveDB(db);
   res.json(sanitizeBusiness(b));
+});
+
+// Same idea as the motoboy push subscription — lets the business's browser
+// register to receive a push when their assigned motoboy arrives at the
+// pickup, even if they're not staring at the tab.
+app.post('/api/businesses/:id/push-subscription', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { subscription } = req.body || {};
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ error: 'Inscrição de notificação inválida' });
+  }
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  if (!Array.isArray(b.pushSubscriptions)) b.pushSubscriptions = [];
+  b.pushSubscriptions = b.pushSubscriptions.filter((s) => s.endpoint !== subscription.endpoint);
+  b.pushSubscriptions.push(subscription);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.delete('/api/businesses/:id/push-subscription', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { endpoint } = req.body || {};
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  b.pushSubscriptions = (b.pushSubscriptions || []).filter((s) => s.endpoint !== endpoint);
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 app.post('/api/businesses/:id/change-password', requireAuth('business'), async (req, res) => {
@@ -1182,7 +1223,7 @@ const CREDIT_COST_PER_RIDE = 1; // every delivery costs exactly 1 credit, no mat
 
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
-  const { pickupAddress, deliveryAddress, value, note } = req.body || {};
+  const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip } = req.body || {};
   const db = loadDB();
   const business = db.businesses[businessId];
   if (!business) return res.status(404).json({ error: 'Comércio não encontrado' });
@@ -1207,7 +1248,20 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   // coordinates from an address string every time.
   const usePreciseForPickup = business.preciseCoords && pickupAddress.trim() === (business.address || '').trim();
   const pickupCoords = usePreciseForPickup ? business.preciseCoords : await geocodeAddress(pickupAddress);
-  const deliveryCoords = await geocodeAddress(deliveryAddress);
+
+  // Same idea for the delivery address: it's typed fresh every order (it's
+  // the customer's address, not the business's own), so there's no saved
+  // profile coordinate to reuse — but the business can pin-drop it on the
+  // map picker for THIS order (see the "marcar local exato" link on the
+  // new-order form), which also beats guessing from the address text.
+  const hasValidOverride =
+    deliveryCoordsOverride &&
+    typeof deliveryCoordsOverride.lat === 'number' &&
+    typeof deliveryCoordsOverride.lng === 'number' &&
+    !Number.isNaN(deliveryCoordsOverride.lat) &&
+    !Number.isNaN(deliveryCoordsOverride.lng);
+  const deliveryCoords = hasValidOverride ? deliveryCoordsOverride : await geocodeAddress(deliveryAddress);
+
 
   // Built AFTER geocoding so it can sort candidates by real distance to
   // the pickup address instead of just fewest-rides-so-far.
@@ -1224,6 +1278,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     deliveryCoords,
     value: rideValue, // paid to the motoboy — does not affect credit balance
     note: note || '',
+    roundTrip: !!roundTrip, // motoboy needs to come back to the pickup point before the order counts as done
     status: 'pendente',
     motoboyId: null,
     motoboyName: null,
@@ -1238,6 +1293,8 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     arrivedPickupAt: null,
     departedAt: null,
     arrivedDeliveryAt: null,
+    returnDepartedAt: null,
+    arrivedReturnAt: null,
     deliveredAt: null,
     cancelledAt: null,
     ratedByBusiness: false,
@@ -1432,6 +1489,13 @@ function arrivalTransition(fromStatus, toStatus, coordsField, extraFields) {
     Object.assign(o, extraFields(req.body || {}));
     o.status = toStatus;
     saveDB(db);
+    if (coordsField === 'pickupCoords' && toStatus === 'no_local_retirada') {
+      notifyBusiness(o.businessId, {
+        title: '🏍️ O motoboy chegou!',
+        body: (o.motoboyName || 'O motoboy') + ' está na sua loja para retirar o pedido #' + o.id.slice(-6).toUpperCase(),
+        data: { type: 'motoboy-arrived', orderId: o.id }
+      });
+    }
     res.json(o);
   };
 }
@@ -1457,11 +1521,70 @@ app.post(
     arrivedDeliveryGeo: body.geo || null
   }))
 );
+app.post('/api/orders/:id/deliver', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  // Round-trip orders finish through complete-return instead — this keeps
+  // a motoboy from skipping the return leg by hitting the "normal" finish
+  // button (the client shouldn't even show it for a round-trip order, but
+  // the server is the one that actually has to enforce it).
+  if (o.roundTrip) {
+    return res.status(409).json({ error: 'Essa corrida é ida e volta — confirme a volta antes de concluir.' });
+  }
+  if (o.status !== 'no_local_entrega') {
+    return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
+  }
+  o.deliveredAt = Date.now();
+  o.status = 'entregue';
+  saveDB(db);
+  res.json(o);
+});
+
+// ---- Ida e volta: dois passos extras, só existem quando o.roundTrip ----
+// Depois de entregar no destino, em vez de encerrar, o motoboy declara que
+// está voltando (sem checagem de GPS, igual o /depart normal), depois
+// confirma a chegada de volta com o mesmo travamento de GPS de sempre — só
+// que o alvo agora é o pickupCoords (voltando para o ponto de retirada
+// original), e só então a corrida realmente termina.
+app.post('/api/orders/:id/depart-return', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (!o.roundTrip) return res.status(409).json({ error: 'Essa corrida não é ida e volta' });
+  if (o.status !== 'no_local_entrega') {
+    return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
+  }
+  o.status = 'retornando';
+  o.returnDepartedAt = Date.now();
+  saveDB(db);
+  res.json(o);
+});
+
 app.post(
-  '/api/orders/:id/deliver',
+  '/api/orders/:id/arrive-return',
   requireAuth('motoboy'),
-  stageTransition('no_local_entrega', 'entregue', () => ({ deliveredAt: Date.now() }))
+  arrivalTransition('retornando', 'no_local_retorno', 'pickupCoords', (body) => ({
+    arrivedReturnAt: Date.now(),
+    arrivedReturnGeo: body.geo || null
+  }))
 );
+
+app.post('/api/orders/:id/complete-return', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (o.status !== 'no_local_retorno') {
+    return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
+  }
+  o.deliveredAt = Date.now();
+  o.status = 'entregue';
+  saveDB(db);
+  res.json(o);
+});
 
 // ---------------------------------------------------------------
 // Ratings — one review per side per completed order (business rates the
@@ -1531,6 +1654,9 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
   const isOwner = req.authType === 'business' && o.businessId === req.authId;
   const isAssignedMotoboy = req.authType === 'motoboy' && o.motoboyId === req.authId;
   if (!isOwner && !isAssignedMotoboy) return res.status(403).json({ error: 'Você não pode cancelar essa corrida' });
+  if (!CANCELABLE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Essa corrida já está com o pedido a caminho (ou concluída) — não dá mais pra cancelar.' });
+  }
   const { reason, note } = req.body || {};
   if (!reason) return res.status(400).json({ error: 'Selecione um motivo para o cancelamento' });
   if (o.creditsCharged) {

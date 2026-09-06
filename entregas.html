@@ -1508,16 +1508,19 @@
       pickupAddress: data.pickupAddress,
       deliveryAddress: data.deliveryAddress,
       value: data.value,
-      note: data.note
+      note: data.note,
+      deliveryCoordsOverride: data.deliveryCoordsOverride || null,
+      roundTrip: !!data.roundTrip
     });
     if(result.error){ showToast(result.error); return; }
-    setState({modal:null});
+    setState({modal:null, newOrderDeliveryCoords:null, newOrderFormSnapshot:null});
     await refreshOrders();
     render();
     showToast(result.offerQueue && result.offerQueue.length>0
       ? 'Corrida enviada para o motoboy mais disponível'
       : 'Corrida solicitada — nenhum motoboy on-line no momento'
     );
+    ensurePushSubscription('business'); // pede permissão aqui — é o momento em que a pessoa realmente quer ser avisada
   }
 
   let topupPollHandle = null;
@@ -1585,7 +1588,7 @@
     const labels = {online:'🟢 Você está on-line — recebendo corridas', pausado:'🟡 Você está pausado — não vai receber novas corridas', offline:'⚪ Você está off-line'};
     showToast(labels[newStatus]);
     if(newStatus === 'online' && typeof pingMotoboyLocationIfOnline === 'function') pingMotoboyLocationIfOnline();
-    if(newStatus === 'online') ensurePushSubscription();
+    if(newStatus === 'online') ensurePushSubscription('motoboy');
   }
 
   // ---------- Localização exata do comércio (mapa com pino arrastável) ----------
@@ -1603,9 +1606,30 @@
   // fica o pino de verdade é o comerciante, olhando o mapa.
   let locationPickerMap = null, locationPickerMarker = null;
 
-  function openLocationPicker(){
+  // mode: 'business' (marca a localização fixa da loja, salva no perfil) ou
+  // 'order-delivery' (marca só a coordenada de entrega desta corrida, usada
+  // uma vez na hora de criar o pedido — endereços de entrega mudam a cada
+  // corrida, então não faz sentido salvar isso permanentemente em lugar nenhum).
+  function openLocationPicker(mode){
     state.showLocationPicker = true;
-    state.locationPickerCoords = (state.profile && state.profile.preciseCoords) || null;
+    state.locationPickerMode = mode || 'business';
+    state.locationPickerCoords = mode === 'order-delivery'
+      ? (state.newOrderDeliveryCoords || null)
+      : ((state.profile && state.profile.preciseCoords) || null);
+    if(mode === 'order-delivery'){
+      const form = $('#form-new-order');
+      if(form){
+        const fd = new FormData(form);
+        const roundTripBox = form.querySelector('#new-order-round-trip');
+        state.newOrderFormSnapshot = {
+          pickupAddress: (fd.get('pickupAddress')||'').toString(),
+          deliveryAddress: (fd.get('deliveryAddress')||'').toString(),
+          value: (fd.get('value')||'').toString(),
+          note: (fd.get('note')||'').toString(),
+          roundTrip: !!(roundTripBox && roundTripBox.checked)
+        };
+      }
+    }
     render();
     // GPS só pra centralizar o mapa num ponto próximo — não é a resposta final.
     if(!state.locationPickerCoords && navigator.geolocation){
@@ -1644,6 +1668,12 @@
   async function saveLocationPicker(){
     if(!locationPickerMarker) return;
     const {lat, lng} = locationPickerMarker.getLatLng();
+    if(state.locationPickerMode === 'order-delivery'){
+      state.newOrderDeliveryCoords = {lat, lng};
+      closeLocationPicker();
+      showToast('✅ Local de entrega marcado no mapa');
+      return;
+    }
     const result = await apiPatch('/api/businesses/'+state.myId+'/location', {lat, lng});
     if(result && result.error){ showToast(result.error); return; }
     state.profile = Object.assign({}, state.profile, {preciseCoords:{lat,lng}});
@@ -1722,7 +1752,7 @@
     return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
   }
 
-  async function ensurePushSubscription(){
+  async function ensurePushSubscription(role){
     try{
       if(!('serviceWorker' in navigator) || !('PushManager' in window)) return;
       if(Notification.permission === 'denied') return;
@@ -1743,13 +1773,18 @@
           applicationServerKey: urlBase64ToUint8Array(cfg.publicKey)
         });
       }
-      await apiPost('/api/motoboys/'+state.myId+'/push-subscription', {subscription: sub.toJSON()});
+      const path = role === 'business' ? '/api/businesses/' : '/api/motoboys/';
+      await apiPost(path+state.myId+'/push-subscription', {subscription: sub.toJSON()});
     }catch(e){
       console.error('Falha ao ativar notificações push', e);
     }
   }
 
-  const ACTIVE_STATUSES = ['aceito','no_local_retirada','em_entrega','no_local_entrega'];
+  const ACTIVE_STATUSES = ['aceito','no_local_retirada','em_entrega','no_local_entrega','retornando','no_local_retorno'];
+  // Mirrors CANCELABLE_STATUSES on the server — once the motoboy has
+  // departed the pickup with the package ('em_entrega' onward), the
+  // cancel option disappears for both sides.
+  const CANCELABLE_STATUSES = ['pendente','aceito','no_local_retirada'];
   const OFFER_TIMEOUT_MS = 30 * 1000; // must match OFFER_TIMEOUT_MS on the server — used here only to draw the countdown
   const PICKUP_WINDOW_MS = 16 * 60 * 1000; // 16 minutes for each leg (to pickup, and to delivery)
   const ARRIVAL_RADIUS_METERS = 150; // must match ARRIVAL_RADIUS_METERS on the server
@@ -1907,6 +1942,35 @@
     await refreshOrders();
     render();
     showToast('Entrega marcada como concluída');
+  }
+
+  // ---- Ida e volta ----
+  async function departReturn(orderId){
+    const result = await apiPost('/api/orders/'+orderId+'/depart-return', {});
+    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    await refreshOrders();
+    render();
+    showToast('Voltando para a retirada');
+  }
+
+  async function arriveAtReturn(orderId){
+    const result = await apiPost('/api/orders/'+orderId+'/arrive-return', {geo: liveGeo});
+    if(result.error){
+      await handleArrivalBlocked(result, orderId, 'arrive-return', arriveAtReturn);
+      return;
+    }
+    stopGeoWatch();
+    await refreshOrders();
+    render();
+    showToast('Chegada de volta registrada — conclua a corrida');
+  }
+
+  async function completeReturn(orderId){
+    const result = await apiPost('/api/orders/'+orderId+'/complete-return', {});
+    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    await refreshOrders();
+    render();
+    showToast('Corrida concluída');
   }
 
   const CANCEL_REASONS_BUSINESS = ['Cliente desistiu','Pedido ainda não está pronto','Endereço informado está incorreto','Pedido foi enviado por outro meio','Outro motivo'];
@@ -2779,20 +2843,55 @@
           <div class="active-ride-sub">até a entrega</div>
           ${renderAddressLine(o.deliveryAddress)}
           ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei na entrega')}
-          ${cancelLink}
         </div>
       `;
     }
-    // no_local_entrega — no cancel option here, delivery is effectively done
+    if(o.status === 'no_local_entrega'){
+      stopGeoWatch();
+      if(o.roundTrip){
+        return `
+          <div class="active-ride is-parked" id="active-ride-banner">
+            <div class="active-ride-head">
+              <span class="active-ride-label">🏁 No destino</span>
+            </div>
+            ${renderAddressLine(o.deliveryAddress)}
+            <div class="active-ride-hint">🔁 Essa corrida é ida e volta. Entregue/pegue o que for necessário e toque em voltar quando estiver pronto.</div>
+            <button class="btn-stage" style="width:100%;margin-top:10px;" data-depart-return="${o.id}">🔁 Voltar para a retirada</button>
+          </div>
+        `;
+      }
+      return `
+        <div class="active-ride is-parked" id="active-ride-banner">
+          <div class="active-ride-head">
+            <span class="active-ride-label">🏁 No destino</span>
+          </div>
+          ${renderAddressLine(o.deliveryAddress)}
+          <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
+          <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
+        </div>
+      `;
+    }
+    if(o.status === 'retornando'){
+      return `
+        <div class="active-ride" id="active-ride-banner">
+          <div class="active-ride-head">
+            <span class="active-ride-label">🔁 Voltando para a retirada</span>
+          </div>
+          ${renderAddressLine(o.pickupAddress)}
+          ${renderGpsLock(o, 'pickupCoords', 'return', 'data-arrive-return', '📍 Cheguei de volta')}
+        </div>
+      `;
+    }
+    // no_local_retorno — corrida de ida e volta, última etapa
     stopGeoWatch();
     return `
       <div class="active-ride is-parked" id="active-ride-banner">
         <div class="active-ride-head">
-          <span class="active-ride-label">🏁 No destino</span>
+          <span class="active-ride-label">🔁 De volta na retirada</span>
         </div>
-        ${renderAddressLine(o.deliveryAddress)}
-        <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
-        <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
+        ${renderAddressLine(o.pickupAddress)}
+        <div class="active-ride-hint">Chegou de volta — confirme para concluir a corrida.</div>
+        <button class="btn-deliver" style="width:100%;margin-top:10px;" data-complete-return="${o.id}">✅ Concluir corrida</button>
       </div>
     `;
   }
@@ -2803,6 +2902,8 @@
     if(status==='no_local_retirada') return `<span class="ticket-badge badge-aceito">Na retirada</span>`;
     if(status==='em_entrega') return `<span class="ticket-badge badge-aceito">A caminho da entrega</span>`;
     if(status==='no_local_entrega') return `<span class="ticket-badge badge-aceito">No destino</span>`;
+    if(status==='retornando') return `<span class="ticket-badge badge-aceito">🔁 Voltando</span>`;
+    if(status==='no_local_retorno') return `<span class="ticket-badge badge-aceito">🔁 De volta na retirada</span>`;
     if(status==='cancelado') return `<span class="ticket-badge badge-cancelado">Cancelada</span>`;
     return `<span class="ticket-badge badge-entregue">Entregue</span>`;
   }
@@ -2830,12 +2931,16 @@
           <button class="btn-cancel" data-decline="${o.id}">Recusar</button>
           <button class="btn-accept" data-accept="${o.id}">Aceitar corrida</button>
         </div>`;
-    } else if(mode==='motoboy-mine' && ACTIVE_STATUSES.includes(o.status)){
+    } else if(mode==='motoboy-mine' && CANCELABLE_STATUSES.includes(o.status)){
       actions = `<div class="ticket-actions">
         <a class="call-link" style="flex:1;text-align:center;" href="tel:${esc(o.businessPhone)}">📞 ${esc(o.businessName)}</a>
         <button class="btn-cancel" data-open-cancel="${o.id}">Cancelar</button>
       </div>`;
-    } else if(mode==='business' && (o.status==='pendente' || ACTIVE_STATUSES.includes(o.status))){
+    } else if(mode==='motoboy-mine' && ACTIVE_STATUSES.includes(o.status)){
+      actions = `<div class="ticket-actions">
+        <a class="call-link" style="flex:1;text-align:center;" href="tel:${esc(o.businessPhone)}">📞 ${esc(o.businessName)}</a>
+      </div>`;
+    } else if(mode==='business' && (o.status==='pendente' || CANCELABLE_STATUSES.includes(o.status))){
       actions = `<div class="ticket-actions">
         <button class="btn-cancel" data-open-cancel="${o.id}">Cancelar corrida</button>
       </div>`;
@@ -2909,6 +3014,15 @@
     const backdrop = document.createElement('div');
     backdrop.className='modal-backdrop';
     backdrop.id='modal-backdrop';
+    // Preserva o que a pessoa já tinha digitado se este modal está sendo
+    // re-renderizado (ex: depois de fechar o mapa de ajuste de entrega) —
+    // sem isso, reabrir o formulário do zero apagaria tudo que já foi
+    // preenchido.
+    const snap = state.newOrderFormSnapshot || {};
+    const vPickup = snap.pickupAddress !== undefined ? snap.pickupAddress : state.profile.address;
+    const vDelivery = snap.deliveryAddress || '';
+    const vValue = snap.value || '';
+    const vNote = snap.note || '';
     backdrop.innerHTML = `
       <div class="modal-sheet">
         <div class="modal-head">
@@ -2918,20 +3032,29 @@
         <form id="form-new-order" novalidate>
           <div class="field">
             <label>Endereço de retirada</label>
-            <textarea name="pickupAddress">${esc(state.profile.address)}</textarea>
+            <textarea name="pickupAddress">${esc(vPickup)}</textarea>
           </div>
           <div class="field">
             <label>Endereço de entrega</label>
-            <textarea name="deliveryAddress" placeholder="Rua, número, bairro, cidade"></textarea>
+            <textarea name="deliveryAddress" placeholder="Rua, número, bairro, cidade">${esc(vDelivery)}</textarea>
+            <div class="field-hint" id="new-order-delivery-precision">
+              ${state.newOrderDeliveryCoords
+                ? '✅ Localização exata marcada nesse mapa — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>'
+                : '💡 Endereço digitado pode ficar impreciso no mapa — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar local exato no mapa</button> (recomendado)'}
+            </div>
           </div>
           <div class="field">
             <label>Valor que o motoboy vai receber (R$)</label>
-            <input type="number" name="value" step="0.01" min="0" placeholder="15.00">
+            <input type="number" name="value" step="0.01" min="0" placeholder="15.00" value="${esc(vValue)}">
             <div class="field-hint">💡 Isso é só o que o motoboy recebe — essa corrida sempre consome 1 crédito do seu saldo, não importa esse valor.</div>
           </div>
           <div class="field">
             <label>Observações (opcional)</label>
-            <textarea name="note" placeholder="Ex: entregar na portaria, pedido embalado, etc"></textarea>
+            <textarea name="note" placeholder="Ex: entregar na portaria, pedido embalado, etc">${esc(vNote)}</textarea>
+          </div>
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px;">
+            <input type="checkbox" id="new-order-round-trip" name="roundTrip" ${snap.roundTrip ? 'checked' : ''} style="width:auto;">
+            <label for="new-order-round-trip" style="margin:0;font-size:13px;">🔁 Ida e volta (o motoboy espera e retorna com algo)</label>
           </div>
           <button type="button" id="btn-submit-order" class="btn-primary">Chamar motoboy</button>
         </form>
@@ -3180,7 +3303,7 @@
     if(btnOpenProfile) btnOpenProfile.onclick = ()=>setState({screen:'profile'});
 
     const btnNewOrder = $('#btn-new-order');
-    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order'});
+    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderFormSnapshot:null});
 
     const modalClose = $('#modal-close');
     if(modalClose) modalClose.onclick = ()=>setState({modal:null});
@@ -3190,7 +3313,9 @@
     const btnOpenTopup = $('#btn-open-topup');
     if(btnOpenTopup) btnOpenTopup.onclick = ()=>{ state.showTopup=true; state.topupPix=null; render(); };
     const btnMarkLocation = $('#btn-mark-location');
-    if(btnMarkLocation) btnMarkLocation.onclick = openLocationPicker;
+    if(btnMarkLocation) btnMarkLocation.onclick = ()=>openLocationPicker('business');
+    const btnMarkDeliveryLocation = $('#btn-mark-delivery-location');
+    if(btnMarkDeliveryLocation) btnMarkDeliveryLocation.onclick = ()=>openLocationPicker('order-delivery');
     const btnOpenStatement = $('#btn-open-statement');
     if(btnOpenStatement) btnOpenStatement.onclick = openStatement;
 
@@ -3267,7 +3392,7 @@
         }
         btnSubmitOrder.disabled = true;
         btnSubmitOrder.textContent = 'Enviando…';
-        createOrder({ pickupAddress, deliveryAddress, value, note: fd.get('note') });
+        createOrder({ pickupAddress, deliveryAddress, value, note: fd.get('note'), deliveryCoordsOverride: state.newOrderDeliveryCoords, roundTrip: fd.get('roundTrip') === 'on' });
       }catch(err){
         console.error('Falha ao criar corrida', err);
         showToast('Deu um erro ao solicitar. Tenta de novo.');
@@ -3354,6 +3479,15 @@
     });
     root.querySelectorAll('[data-deliver]').forEach(elm=>{
       elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Confirmando…'; markDelivered(elm.getAttribute('data-deliver')); };
+    });
+    root.querySelectorAll('[data-depart-return]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Saindo…'; departReturn(elm.getAttribute('data-depart-return')); };
+    });
+    root.querySelectorAll('[data-arrive-return]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Registrando…'; arriveAtReturn(elm.getAttribute('data-arrive-return')); };
+    });
+    root.querySelectorAll('[data-complete-return]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Concluindo…'; completeReturn(elm.getAttribute('data-complete-return')); };
     });
     root.querySelectorAll('[data-open-cancel]').forEach(elm=>{
       elm.onclick = ()=>openCancelModal(elm.getAttribute('data-open-cancel'));
