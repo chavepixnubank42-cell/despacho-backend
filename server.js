@@ -373,6 +373,43 @@ app.patch('/api/admin/motoboys/:id/approve', requireAuth('admin'), (req, res) =>
   res.json(sanitizeMotoboy(m));
 });
 
+// Permanently removes a business. Order history keeps working fine
+// afterwards — businessName/deliveryAddress etc. are snapshotted onto each
+// order at creation time, not looked up live — but we refuse to delete
+// while the business has an order still in flight, since that order's
+// businessId would otherwise point at nothing.
+app.delete('/api/admin/businesses/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  const hasActiveOrder = Object.values(db.orders).some(
+    (o) => o.businessId === b.id && (o.status === 'pendente' || ACTIVE_STATUSES.includes(o.status))
+  );
+  if (hasActiveOrder) {
+    return res.status(409).json({ error: 'Esse comércio tem uma entrega em andamento — espere ela terminar (ou cancele) antes de excluir.' });
+  }
+  delete db.businesses[b.id];
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Same idea for a motoboy — safe to delete once nothing of theirs is
+// still in flight; their name/phone stay on past orders as a snapshot.
+app.delete('/api/admin/motoboys/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  const hasActiveOrder = Object.values(db.orders).some(
+    (o) => o.motoboyId === m.id && ACTIVE_STATUSES.includes(o.status)
+  );
+  if (hasActiveOrder) {
+    return res.status(409).json({ error: 'Esse motoboy tem uma entrega em andamento — espere ela terminar antes de excluir.' });
+  }
+  delete db.motoboys[m.id];
+  saveDB(db);
+  res.json({ ok: true });
+});
+
 // Editing a comércio/motoboy's own basic details from the admin panel —
 // same validation as their own self-edit routes above, just reachable by
 // an admin instead of requiring the account holder to do it themselves.

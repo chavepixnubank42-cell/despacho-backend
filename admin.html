@@ -217,6 +217,20 @@
     showToast(blocked ? 'Motoboy bloqueado' : 'Motoboy desbloqueado');
     await loadAll(); render();
   }
+  async function deleteBusiness(id, name){
+    if(!confirm('Excluir "'+name+'" permanentemente? Essa ação não pode ser desfeita — o histórico de entregas antigas continua registrado, mas a conta e os créditos somem.')) return;
+    const result = await api('DELETE', '/api/admin/businesses/'+id, {});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Comércio excluído');
+    await loadAll(); render();
+  }
+  async function deleteMotoboy(id, name){
+    if(!confirm('Excluir "'+name+'" permanentemente? Essa ação não pode ser desfeita — o histórico de entregas antigas continua registrado, mas a conta some.')) return;
+    const result = await api('DELETE', '/api/admin/motoboys/'+id, {});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Motoboy excluído');
+    await loadAll(); render();
+  }
   async function approveMotoboy(id){
     const result = await api('PATCH', '/api/admin/motoboys/'+id+'/approve', {approved:true});
     if(result.error){ showToast(result.error); return; }
@@ -308,6 +322,7 @@
             <div class="row-actions">
               <button class="btn-ghost" data-edit-business="${b.id}">Editar</button>
               <button class="btn-ghost ${b.blocked?'btn-ok':'btn-danger'}" data-block-business="${b.id}" data-blocked="${b.blocked?'0':'1'}">${b.blocked?'Desbloquear':'Bloquear'}</button>
+              <button class="btn-ghost btn-danger" data-delete-business="${b.id}" data-name="${esc(b.name)}">Excluir</button>
             </div>
           </div>
           ${state.editingId===b.id ? `
@@ -337,6 +352,7 @@
               <button class="btn-ghost" data-edit-motoboy="${m.id}">Editar</button>
               ${m.approved===false ? `<button class="btn-ghost btn-ok" data-approve-motoboy="${m.id}">✓ Aprovar</button>` : ''}
               <button class="btn-ghost ${m.blocked?'btn-ok':'btn-danger'}" data-block-motoboy="${m.id}" data-blocked="${m.blocked?'0':'1'}">${m.blocked?'Desbloquear':'Bloquear'}</button>
+              <button class="btn-ghost btn-danger" data-delete-motoboy="${m.id}" data-name="${esc(m.name)}">Excluir</button>
             </div>
           </div>
           ${state.editingId===m.id ? `
@@ -448,6 +464,12 @@
       });
       root.querySelectorAll('[data-block-motoboy]').forEach(el=>{
         el.onclick = ()=>toggleMotoboyBlock(el.getAttribute('data-block-motoboy'), el.getAttribute('data-blocked')==='1');
+      });
+      root.querySelectorAll('[data-delete-business]').forEach(el=>{
+        el.onclick = ()=>deleteBusiness(el.getAttribute('data-delete-business'), el.getAttribute('data-name'));
+      });
+      root.querySelectorAll('[data-delete-motoboy]').forEach(el=>{
+        el.onclick = ()=>deleteMotoboy(el.getAttribute('data-delete-motoboy'), el.getAttribute('data-name'));
       });
       root.querySelectorAll('[data-approve-motoboy]').forEach(el=>{
         el.onclick = ()=>approveMotoboy(el.getAttribute('data-approve-motoboy'));
