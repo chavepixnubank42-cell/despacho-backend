@@ -97,6 +97,25 @@
     text-transform:uppercase;
     letter-spacing:0.5px;
   }
+  .notice-dot{
+    position:absolute; top:-4px; right:-4px;
+    background:var(--orange, #ff6a00); color:#1a0800;
+    font-family:var(--font-mono); font-size:9px; font-weight:700;
+    border-radius:999px; min-width:15px; height:15px; padding:0 3px;
+    display:flex; align-items:center; justify-content:center; line-height:1;
+  }
+  .notice-item{
+    border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;
+  }
+  .notice-item.unread{ border-color:var(--lime); }
+  .notice-item-title{ font-size:14px; font-weight:600; margin-bottom:4px; }
+  .notice-item-body{ font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:6px; }
+  .notice-item-date{ font-size:11px; color:var(--muted); font-family:var(--font-mono); }
+  .free-credits-banner{
+    display:flex; align-items:center; gap:8px; background:rgba(120,220,120,0.1);
+    border:1px solid var(--ok, #6fd66f); color:var(--ok, #6fd66f);
+    border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
+  }
   .btn-ghost{
     background:none;
     border:1px solid var(--border);
@@ -1331,6 +1350,7 @@
         state.profile = me.profile;
         state.screen = me.type==='business' ? 'business-dash' : 'motoboy-dash';
         resetNotificationTracking();
+        resetNoticeTracking();
         await refreshOrders();
         await refreshMyRatingSummary();
         startPolling();
@@ -1428,6 +1448,29 @@
     }
   }
 
+  // Keeps state.profile fresh (credits, blocked status, free-credits promo,
+  // in-app notices) without needing a full re-login. New unread notices get
+  // a toast + sound the same way a new order does, so nothing gets missed
+  // even for people who never granted push permission.
+  let knownNoticeIds = new Set();
+  function resetNoticeTracking(){ knownNoticeIds = new Set((state.profile && state.profile.notices || []).map(n=>n.id)); }
+  async function refreshProfile(){
+    if(!state.authToken) return;
+    const me = await apiGet('/api/me');
+    if(me.error || !me.profile) return;
+    const notices = me.profile.notices || [];
+    const freshUnread = notices.filter(n=>!n.read && !knownNoticeIds.has(n.id));
+    if(freshUnread.length && knownNoticeIds.size > 0){
+      // skip the toast on the very first load (knownNoticeIds empty) — that's just catching up, not "new"
+      freshUnread.forEach(n=>{
+        showToast((n.promo ? '🎁 ' : '📣 ') + n.title);
+      });
+      playNewOrderAlert();
+    }
+    knownNoticeIds = new Set(notices.map(n=>n.id));
+    state.profile = me.profile;
+  }
+
   function startPolling(){
     if(pollHandle) clearInterval(pollHandle);
     pollHandle = setInterval(async ()=>{
@@ -1435,6 +1478,7 @@
       // is typing would reset the field and make it look like it's blinking.
       if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker) return;
       await refreshOrders();
+      await refreshProfile();
       render();
     }, 3000);
   }
@@ -1449,6 +1493,7 @@
     state.profile = profile;
     state.screen = role==='business' ? 'business-dash' : 'motoboy-dash';
     resetNotificationTracking();
+    resetNoticeTracking();
     await refreshOrders();
     await refreshMyRatingSummary();
     startPolling();
@@ -2074,6 +2119,7 @@
     else if(state.screen==='statement') main.appendChild(renderStatement());
     else if(state.screen==='invoice') main.appendChild(renderInvoice());
     else if(state.screen==='profile') main.appendChild(renderProfile());
+    else if(state.screen==='notices') main.appendChild(renderNotices());
     else if(state.screen==='history-business') main.appendChild(renderHistoryBusiness());
     else if(state.screen==='history-motoboy') main.appendChild(renderHistoryMotoboy());
     else if(state.screen==='motoboy-dash') main.appendChild(renderMotoboyDash());
@@ -2133,7 +2179,9 @@
       const statusDots = {online:' 🟢', pausado:' 🟡', offline:' ⚪'};
       const statusDot = state.role==='motoboy' ? statusDots[motoboyStatus()] : '';
       const roleIcon = state.role==='business' ? '🏬' : '🏍️';
+      const unreadCount = ((state.profile.notices)||[]).filter(n=>!n.read).length;
       right = `
+        <button class="btn-ghost" id="btn-open-notices" style="position:relative;">🔔${unreadCount>0?`<span class="notice-dot">${unreadCount>9?'9+':unreadCount}</span>`:''}</button>
         <span class="role-chip" id="btn-open-profile" style="cursor:pointer;">${roleIcon} ${esc(state.profile.name)}${statusDot}</span>
         <button class="btn-ghost" id="btn-logout">Sair</button>
       `;
@@ -2317,6 +2365,39 @@
       <div style="margin-top:22px;"><button class="btn-secondary" data-goto="login-motoboy">← Voltar</button></div>
     `;
     return d;
+  }
+
+  function renderNotices(){
+    const d = document.createElement('div');
+    const isBusiness = state.role==='business';
+    const notices = ((state.profile && state.profile.notices) || []).slice();
+    d.innerHTML = `
+      <p class="eyebrow">Avisos</p>
+      <h1 class="page-title">🔔 Avisos e promoções</h1>
+      ${notices.length ? notices.map(n=>`
+        <div class="notice-item ${n.read?'':'unread'}">
+          <div class="notice-item-title">${n.promo?'🎁 ':'📣 '}${esc(n.title)}</div>
+          <div class="notice-item-body">${esc(n.body)}</div>
+          <div class="notice-item-date">${formatDateTime(n.createdAt)}</div>
+        </div>
+      `).join('') : `
+        <div class="empty-state">
+          <span class="empty-state-emoji">🔕</span>
+          <div class="empty-state-text">Nenhum aviso por aqui ainda.</div>
+        </div>
+      `}
+      <div style="margin-top:22px;"><button class="btn-secondary" data-goto="${isBusiness?'business-dash':'motoboy-dash'}">← Voltar</button></div>
+    `;
+    return d;
+  }
+
+  async function markNoticesRead(){
+    if(!state.profile) return;
+    const endpoint = state.role==='business'
+      ? '/api/businesses/'+state.myId+'/notices/read-all'
+      : '/api/motoboys/'+state.myId+'/notices/read-all';
+    const result = await apiPost(endpoint, {});
+    if(!result.error) state.profile = result;
   }
 
   function renderProfile(){
@@ -2629,7 +2710,10 @@
           : '⚠️ Localização aproximada (baseada no endereço digitado) — <button id="btn-mark-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar localização exata</button>'}
       </p>
       <div style="margin-bottom:16px;">${ratingBadgeHtml()}</div>
-      <div class="credit-card ${credits<=0?'is-empty':''}">
+      ${state.profile.freeCreditsEffective ? `
+      <div class="free-credits-banner">🎁 Créditos grátis ativos${state.profile.freeCredits && state.profile.freeCredits.until ? ' até '+formatDateTime(state.profile.freeCredits.until).split(',')[0] : ''} — suas entregas não estão descontando crédito agora.</div>
+      ` : ''}
+      <div class="credit-card ${(credits<=0 && !state.profile.freeCreditsEffective)?'is-empty':''}">
         <div class="credit-label">Créditos disponíveis (1 crédito = 1 entrega)</div>
         <div class="credit-value">${formatCredits(credits)}</div>
         <button class="btn-topup" id="btn-open-topup">+ Adicionar créditos</button>
@@ -3301,6 +3385,11 @@
 
     const btnOpenProfile = $('#btn-open-profile');
     if(btnOpenProfile) btnOpenProfile.onclick = ()=>setState({screen:'profile'});
+    const btnOpenNotices = $('#btn-open-notices');
+    if(btnOpenNotices) btnOpenNotices.onclick = ()=>{
+      setState({screen:'notices'});
+      markNoticesRead();
+    };
 
     const btnNewOrder = $('#btn-new-order');
     if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderFormSnapshot:null});

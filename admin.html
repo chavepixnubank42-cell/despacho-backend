@@ -86,6 +86,34 @@
     pointer-events:none; max-width:90vw; text-align:center;
   }
   #toast.show{ opacity:1; }
+  .select-row{ display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .select-row label{ font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .row-checkbox{ width:18px; height:18px; flex-shrink:0; accent-color:var(--lime); cursor:pointer; }
+  .bulk-bar{
+    position:sticky; top:0; z-index:5; display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+    background:#1B1B22; border:1px solid var(--lime); border-radius:10px; padding:10px 12px; margin-bottom:14px;
+  }
+  .bulk-bar .count{ font-size:12px; color:var(--lime); font-family:var(--font-mono); margin-right:auto; }
+  .badge.free{ color:var(--ok); border-color:var(--ok); }
+  .field textarea{
+    width:100%; padding:12px 14px; border-radius:10px; resize:vertical; min-height:90px;
+    background:var(--card); border:1px solid var(--border); color:var(--text); font-size:14px; font-family:inherit;
+  }
+  .field select{
+    width:100%; padding:12px 14px; border-radius:10px;
+    background:var(--card); border:1px solid var(--border); color:var(--text); font-size:15px;
+  }
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:20;
+    display:flex; align-items:center; justify-content:center; padding:16px;
+  }
+  .modal-box{
+    background:var(--bg); border:1px solid var(--border); border-radius:14px;
+    padding:20px; width:100%; max-width:420px; max-height:88vh; overflow-y:auto;
+  }
+  .modal-box h2{ margin:0 0 14px; font-size:17px; }
+  .msg-history-item{ border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:10px; background:var(--card); }
+  .msg-history-item .row-sub{ margin-top:4px; }
 </style>
 </head>
 <body>
@@ -109,7 +137,12 @@
     orders: [],
     reportPeriod: 'semana',
     report: null,
-    editingId: null // id of the business/motoboy row currently showing its edit form (only one at a time)
+    editingId: null, // id of the business/motoboy row currently showing its edit form (only one at a time)
+    selectedBusinessIds: new Set(),
+    selectedMotoboyIds: new Set(),
+    messages: [],
+    freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
+    messageModal: null // {audience, type, title, body, ids} while the compose dialog is open
   };
 
   function esc(s){
@@ -117,6 +150,14 @@
   }
   function formatMoney(v){
     return 'R$ ' + (Number(v)||0).toFixed(2).replace('.', ',');
+  }
+  function formatDate(ts){
+    if(!ts) return '';
+    return new Date(ts).toLocaleDateString('pt-BR');
+  }
+  function formatDateTime(ts){
+    if(!ts) return '';
+    return new Date(ts).toLocaleString('pt-BR');
   }
   function showToast(msg){
     const t = document.getElementById('toast');
@@ -174,16 +215,18 @@
   }
 
   async function loadAll(){
-    const [summary, businesses, motoboys, orders] = await Promise.all([
+    const [summary, businesses, motoboys, orders, messages] = await Promise.all([
       api('GET', '/api/admin/summary'),
       api('GET', '/api/admin/businesses'),
       api('GET', '/api/admin/motoboys'),
-      api('GET', '/api/admin/orders')
+      api('GET', '/api/admin/orders'),
+      api('GET', '/api/admin/messages')
     ]);
     if(!summary.error) state.summary = summary;
     if(Array.isArray(businesses)) state.businesses = businesses;
     if(Array.isArray(motoboys)) state.motoboys = motoboys;
     if(Array.isArray(orders)) state.orders = orders;
+    if(Array.isArray(messages)) state.messages = messages;
   }
 
   async function loadReport(){
@@ -254,6 +297,77 @@
     render();
   }
 
+  // ---------- seleção múltipla ----------
+  function toggleSelected(setKey, id){
+    const s = state[setKey];
+    if(s.has(id)) s.delete(id); else s.add(id);
+    render();
+  }
+  function toggleSelectAll(setKey, allIds){
+    const s = state[setKey];
+    if(allIds.every(id=>s.has(id))) allIds.forEach(id=>s.delete(id));
+    else allIds.forEach(id=>s.add(id));
+    render();
+  }
+  function clearSelection(setKey){
+    state[setKey].clear();
+    render();
+  }
+
+  // ---------- créditos grátis ----------
+  function openFreeCreditsModal(ids, active){
+    state.freeCreditsModal = { ids, active, until: '' };
+    render();
+  }
+  function closeFreeCreditsModal(){
+    state.freeCreditsModal = null;
+    render();
+  }
+  async function confirmFreeCredits(){
+    const m = state.freeCreditsModal;
+    if(!m) return;
+    const untilTs = m.until ? new Date(m.until + 'T23:59:59').getTime() : null;
+    const result = await api('POST', '/api/admin/businesses/free-credits-bulk', {
+      ids: m.ids, active: m.active, until: untilTs
+    });
+    if(result.error){ showToast(result.error); return; }
+    showToast(m.active
+      ? `🎁 Créditos grátis ativados para ${result.count} comércio(s)`
+      : `Créditos grátis desativados para ${result.count} comércio(s)`);
+    state.freeCreditsModal = null;
+    state.selectedBusinessIds.clear();
+    await loadAll();
+    render();
+  }
+
+  // ---------- mensagens ----------
+  function openMessageModal(audience, ids){
+    state.messageModal = { audience, type: 'aviso', title: '', body: '', ids: ids || [] };
+    render();
+  }
+  function closeMessageModal(){
+    state.messageModal = null;
+    render();
+  }
+  async function confirmSendMessage(){
+    const m = state.messageModal;
+    if(!m) return;
+    if(!m.title.trim() || !m.body.trim()){ showToast('Preencha o título e a mensagem'); return; }
+    const destino = m.ids.length ? `${m.ids.length} selecionado(s)` : 'TODOS os '+(m.audience==='business'?'comércios':'motoboys');
+    if(!confirm(`Enviar essa mensagem para ${destino}? Não dá pra desfazer depois de enviada.`)) return;
+    const result = await api('POST', '/api/admin/messages', {
+      audience: m.audience, type: m.type, title: m.title.trim(), body: m.body.trim(),
+      ids: m.ids.length ? m.ids : null
+    });
+    if(result.error){ showToast(result.error); return; }
+    showToast('✅ Mensagem enviada para ' + result.message.targetCount + ' destinatário(s)');
+    state.messageModal = null;
+    state.selectedBusinessIds.clear();
+    state.selectedMotoboyIds.clear();
+    await loadAll();
+    render();
+  }
+
   const STATUS_LABELS = {
     pendente:'Procurando motoboy', aceito:'Aceita', no_local_retirada:'Na retirada',
     em_entrega:'Em entrega', no_local_entrega:'No destino', retornando:'🔁 Voltando', no_local_retorno:'🔁 De volta na retirada',
@@ -313,15 +427,35 @@
         </div>
       `;
     } else if(state.tab === 'comercios'){
-      body = (state.businesses||[]).map(b => `
+      const list = state.businesses||[];
+      const allIds = list.map(b=>b.id);
+      const sel = state.selectedBusinessIds;
+      const bulkBar = sel.size>0 ? `
+        <div class="bulk-bar">
+          <span class="count">${sel.size} selecionado(s)</span>
+          <button class="btn-ghost btn-ok" data-bulk-free-on="1">🎁 Ativar grátis</button>
+          <button class="btn-ghost" data-bulk-free-off="1">Desativar grátis</button>
+          <button class="btn-ghost" data-bulk-message="1">✉️ Mensagem</button>
+          <button class="btn-ghost" data-clear-selection="business">Limpar</button>
+        </div>
+      ` : '';
+      body = `
+        ${allIds.length ? `<div class="select-row"><label><input type="checkbox" class="row-checkbox" id="select-all-business" ${allIds.length && allIds.every(id=>sel.has(id))?'checked':''}> Selecionar todos</label></div>` : ''}
+        ${bulkBar}
+        ${list.map(b => `
         <div class="row" style="flex-direction:column;align-items:stretch;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <input type="checkbox" class="row-checkbox" data-select-business="${b.id}" ${sel.has(b.id)?'checked':''}>
             <div class="row-main">
-              <strong>${esc(b.name)}</strong>${b.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}
+              <strong>${esc(b.name)}</strong>${b.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}${b.freeCreditsEffective?'<span class="badge free">🎁 GRÁTIS'+(b.freeCredits&&b.freeCredits.until?' até '+formatDate(b.freeCredits.until):'')+'</span>':''}
               <div class="row-sub">${esc(b.email||b.phone||'')} · ${b.ridesCount||0} entregas · saldo ${formatMoney(b.credits||0)}</div>
             </div>
             <div class="row-actions">
               <button class="btn-ghost" data-edit-business="${b.id}">Editar</button>
+              <button class="btn-ghost" data-message-business="${b.id}">✉️ Mensagem</button>
+              ${b.freeCreditsEffective
+                ? `<button class="btn-ghost" data-free-off-one="${b.id}">Desativar grátis</button>`
+                : `<button class="btn-ghost btn-ok" data-free-on-one="${b.id}">🎁 Créditos grátis</button>`}
               <button class="btn-ghost ${b.blocked?'btn-ok':'btn-danger'}" data-block-business="${b.id}" data-blocked="${b.blocked?'0':'1'}">${b.blocked?'Desbloquear':'Bloquear'}</button>
               <button class="btn-ghost btn-danger" data-delete-business="${b.id}" data-name="${esc(b.name)}">Excluir</button>
             </div>
@@ -339,18 +473,33 @@
           </div>
           ` : ''}
         </div>
-      `).join('') || '<p class="empty">Nenhum comércio cadastrado ainda.</p>';
+      `).join('') || '<p class="empty">Nenhum comércio cadastrado ainda.</p>'}
+      `;
     } else if(state.tab === 'motoboys'){
       const sorted = (state.motoboys||[]).slice().sort((a,b)=> (a.approved===false?0:1) - (b.approved===false?0:1));
-      body = sorted.map(m => `
+      const allIds = sorted.map(m=>m.id);
+      const sel = state.selectedMotoboyIds;
+      const bulkBar = sel.size>0 ? `
+        <div class="bulk-bar">
+          <span class="count">${sel.size} selecionado(s)</span>
+          <button class="btn-ghost" data-bulk-message-motoboy="1">✉️ Mensagem</button>
+          <button class="btn-ghost" data-clear-selection="motoboy">Limpar</button>
+        </div>
+      ` : '';
+      body = `
+        ${allIds.length ? `<div class="select-row"><label><input type="checkbox" class="row-checkbox" id="select-all-motoboy" ${allIds.length && allIds.every(id=>sel.has(id))?'checked':''}> Selecionar todos</label></div>` : ''}
+        ${bulkBar}
+        ${sorted.map(m => `
         <div class="row" style="flex-direction:column;align-items:stretch;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <input type="checkbox" class="row-checkbox" data-select-motoboy="${m.id}" ${sel.has(m.id)?'checked':''}>
             <div class="row-main">
               <strong>${esc(m.name)}</strong>${m.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}${m.approved===false?'<span class="badge pending">AGUARDANDO APROVAÇÃO</span>':''}
               <div class="row-sub">${esc(m.email||m.phone||'')} · ${esc(m.vehicle||'')} · ${m.ridesCount||0} entregas · status ${esc(m.status||'offline')}${m.rating&&m.rating.count?' · ⭐ '+m.rating.average.toFixed(1):''}</div>
             </div>
             <div class="row-actions">
               <button class="btn-ghost" data-edit-motoboy="${m.id}">Editar</button>
+              <button class="btn-ghost" data-message-motoboy="${m.id}">✉️ Mensagem</button>
               ${m.approved===false ? `<button class="btn-ghost btn-ok" data-approve-motoboy="${m.id}">✓ Aprovar</button>` : ''}
               <button class="btn-ghost ${m.blocked?'btn-ok':'btn-danger'}" data-block-motoboy="${m.id}" data-blocked="${m.blocked?'0':'1'}">${m.blocked?'Desbloquear':'Bloquear'}</button>
               <button class="btn-ghost btn-danger" data-delete-motoboy="${m.id}" data-name="${esc(m.name)}">Excluir</button>
@@ -369,7 +518,8 @@
           </div>
           ` : ''}
         </div>
-      `).join('') || '<p class="empty">Nenhum motoboy cadastrado ainda.</p>';
+      `).join('') || '<p class="empty">Nenhum motoboy cadastrado ainda.</p>'}
+      `;
     } else if(state.tab === 'corridas'){
       body = (state.orders||[]).slice(0,100).map(o => `
         <div class="row">
@@ -381,6 +531,46 @@
           </div>
         </div>
       `).join('') || '<p class="empty">Nenhuma corrida ainda.</p>';
+    } else if(state.tab === 'mensagens'){
+      body = `
+        <div class="row" style="flex-direction:column;align-items:stretch;">
+          <strong style="margin-bottom:10px;">Nova mensagem</strong>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Público</label>
+            <select id="msg-audience">
+              <option value="business">Comércios</option>
+              <option value="motoboy">Motoboys</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;" id="msg-type-field">
+            <label>Tipo</label>
+            <select id="msg-type">
+              <option value="aviso">Aviso / manutenção</option>
+              <option value="promocao">Promoção</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Título</label>
+            <input class="edit-input" id="msg-title" placeholder="Ex: Manutenção programada">
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Mensagem</label>
+            <textarea id="msg-body" placeholder="Escreva a mensagem..."></textarea>
+          </div>
+          <p class="row-sub" style="margin-bottom:10px;">Vai para <strong>todos</strong> do público escolhido. Para mandar só para alguns, selecione-os nas abas Comércios/Motoboys e use o botão "✉️ Mensagem" de lá.</p>
+          <button class="btn" id="btn-send-broadcast" style="align-self:flex-start;">Enviar para todos</button>
+        </div>
+        <p class="eyebrow" style="margin-top:22px;">Histórico enviado</p>
+        ${(state.messages||[]).length ? state.messages.map(msg => `
+          <div class="msg-history-item">
+            <strong>${esc(msg.title)}</strong>
+            <span class="badge ${msg.type==='promocao'?'free':''}">${msg.type==='promocao'?'Promoção':'Aviso'}</span>
+            <span class="badge">${msg.audience==='business'?'Comércios':'Motoboys'}</span>
+            <div class="row-sub">${esc(msg.body)}</div>
+            <div class="row-sub">${formatDateTime(msg.createdAt)} · ${msg.allAudience ? 'todos' : msg.targetCount+' selecionado(s)'} · ${msg.targetCount} destinatário(s)</div>
+          </div>
+        `).join('') : '<p class="empty">Nenhuma mensagem enviada ainda.</p>'}
+      `;
     } else if(state.tab === 'relatorios'){
       const periodBtn = (key,label) => `<button class="tab ${state.reportPeriod===key?'active':''}" data-report-period="${key}">${label}</button>`;
       const r = state.report;
@@ -415,17 +605,74 @@
         ${tabBtn('comercios','Comércios')}
         ${tabBtn('motoboys','Motoboys')}
         ${tabBtn('corridas','Corridas')}
+        ${tabBtn('mensagens','Mensagens')}
         ${tabBtn('relatorios','Relatórios')}
       </div>
       ${body}
     `;
   }
 
+  function renderModals(){
+    let html = '';
+    if(state.freeCreditsModal){
+      const m = state.freeCreditsModal;
+      html += `
+        <div class="modal-overlay" id="modal-overlay">
+          <div class="modal-box">
+            <h2>${m.active ? '🎁 Ativar créditos grátis' : 'Desativar créditos grátis'}</h2>
+            <p class="row-sub" style="margin-bottom:14px;">${m.ids.length} comércio(s) selecionado(s).</p>
+            ${m.active ? `
+            <div class="field">
+              <label>Válido até (opcional — deixe em branco para grátis sem prazo, até você desligar)</label>
+              <input class="edit-input" type="date" id="free-credits-until" value="${esc(m.until||'')}">
+            </div>` : ''}
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn btn-ok" id="btn-confirm-free-credits">Confirmar</button>
+              <button class="btn-ghost" id="btn-cancel-free-credits">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    if(state.messageModal){
+      const m = state.messageModal;
+      html += `
+        <div class="modal-overlay" id="modal-overlay-2">
+          <div class="modal-box">
+            <h2>✉️ Enviar mensagem</h2>
+            <p class="row-sub" style="margin-bottom:14px;">Para ${esc(m.audience==='business'?'comércios':'motoboys')} · ${m.ids.length ? m.ids.length+' selecionado(s)' : 'TODOS'}</p>
+            ${m.audience==='business' ? `
+            <div class="field">
+              <label>Tipo</label>
+              <select id="compose-type">
+                <option value="aviso" ${m.type==='aviso'?'selected':''}>Aviso / manutenção</option>
+                <option value="promocao" ${m.type==='promocao'?'selected':''}>Promoção</option>
+              </select>
+            </div>` : ''}
+            <div class="field">
+              <label>Título</label>
+              <input class="edit-input" id="compose-title" value="${esc(m.title)}" placeholder="Ex: Promoção de fim de semana">
+            </div>
+            <div class="field">
+              <label>Mensagem</label>
+              <textarea id="compose-body" placeholder="Escreva a mensagem...">${esc(m.body)}</textarea>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn btn-ok" id="btn-confirm-message">Enviar</button>
+              <button class="btn-ghost" id="btn-cancel-message">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    return html;
+  }
+
   function render(){
     const root = document.getElementById('root');
     const wrap = document.createElement('div');
     wrap.className = 'wrap';
-    wrap.innerHTML = state.screen === 'login' ? renderLogin() : renderDash();
+    wrap.innerHTML = (state.screen === 'login' ? renderLogin() : renderDash()) + (state.screen==='dash' ? renderModals() : '');
     root.innerHTML = '';
     root.appendChild(wrap);
 
@@ -503,6 +750,86 @@
           saveMotoboyEdit(id, data);
         };
       });
+
+      // ---------- seleção múltipla ----------
+      root.querySelectorAll('[data-select-business]').forEach(el=>{
+        el.onclick = ()=>toggleSelected('selectedBusinessIds', el.getAttribute('data-select-business'));
+      });
+      root.querySelectorAll('[data-select-motoboy]').forEach(el=>{
+        el.onclick = ()=>toggleSelected('selectedMotoboyIds', el.getAttribute('data-select-motoboy'));
+      });
+      const selectAllBusiness = document.getElementById('select-all-business');
+      if(selectAllBusiness) selectAllBusiness.onclick = ()=>toggleSelectAll('selectedBusinessIds', (state.businesses||[]).map(b=>b.id));
+      const selectAllMotoboy = document.getElementById('select-all-motoboy');
+      if(selectAllMotoboy) selectAllMotoboy.onclick = ()=>toggleSelectAll('selectedMotoboyIds', (state.motoboys||[]).map(m=>m.id));
+      root.querySelectorAll('[data-clear-selection]').forEach(el=>{
+        el.onclick = ()=>clearSelection(el.getAttribute('data-clear-selection')==='business'?'selectedBusinessIds':'selectedMotoboyIds');
+      });
+
+      // ---------- créditos grátis: individual e em massa ----------
+      root.querySelectorAll('[data-free-on-one]').forEach(el=>{
+        el.onclick = ()=>openFreeCreditsModal([el.getAttribute('data-free-on-one')], true);
+      });
+      root.querySelectorAll('[data-free-off-one]').forEach(el=>{
+        el.onclick = ()=>openFreeCreditsModal([el.getAttribute('data-free-off-one')], false);
+      });
+      const bulkFreeOn = document.getElementById('bulk-free-on') || root.querySelector('[data-bulk-free-on]');
+      if(bulkFreeOn) bulkFreeOn.onclick = ()=>openFreeCreditsModal(Array.from(state.selectedBusinessIds), true);
+      const bulkFreeOff = root.querySelector('[data-bulk-free-off]');
+      if(bulkFreeOff) bulkFreeOff.onclick = ()=>openFreeCreditsModal(Array.from(state.selectedBusinessIds), false);
+      const confirmFree = document.getElementById('btn-confirm-free-credits');
+      if(confirmFree) confirmFree.onclick = ()=>{
+        const untilInput = document.getElementById('free-credits-until');
+        if(untilInput) state.freeCreditsModal.until = untilInput.value;
+        confirmFreeCredits();
+      };
+      const cancelFree = document.getElementById('btn-cancel-free-credits');
+      if(cancelFree) cancelFree.onclick = closeFreeCreditsModal;
+
+      // ---------- mensagens: individual e em massa ----------
+      root.querySelectorAll('[data-message-business]').forEach(el=>{
+        el.onclick = ()=>openMessageModal('business', [el.getAttribute('data-message-business')]);
+      });
+      root.querySelectorAll('[data-message-motoboy]').forEach(el=>{
+        el.onclick = ()=>openMessageModal('motoboy', [el.getAttribute('data-message-motoboy')]);
+      });
+      const bulkMessage = root.querySelector('[data-bulk-message]');
+      if(bulkMessage) bulkMessage.onclick = ()=>openMessageModal('business', Array.from(state.selectedBusinessIds));
+      const bulkMessageMotoboy = root.querySelector('[data-bulk-message-motoboy]');
+      if(bulkMessageMotoboy) bulkMessageMotoboy.onclick = ()=>openMessageModal('motoboy', Array.from(state.selectedMotoboyIds));
+      const confirmMessage = document.getElementById('btn-confirm-message');
+      if(confirmMessage) confirmMessage.onclick = ()=>{
+        state.messageModal.type = (document.getElementById('compose-type')||{}).value || 'aviso';
+        state.messageModal.title = (document.getElementById('compose-title')||{}).value || '';
+        state.messageModal.body = (document.getElementById('compose-body')||{}).value || '';
+        confirmSendMessage();
+      };
+      const cancelMessage = document.getElementById('btn-cancel-message');
+      if(cancelMessage) cancelMessage.onclick = closeMessageModal;
+
+      // ---------- aba mensagens: envio de broadcast para todos ----------
+      const sendBroadcast = document.getElementById('btn-send-broadcast');
+      if(sendBroadcast) sendBroadcast.onclick = async ()=>{
+        const audience = (document.getElementById('msg-audience')||{}).value || 'business';
+        const type = (document.getElementById('msg-type')||{}).value || 'aviso';
+        const title = (document.getElementById('msg-title')||{}).value || '';
+        const bodyText = (document.getElementById('msg-body')||{}).value || '';
+        if(!title.trim() || !bodyText.trim()){ showToast('Preencha o título e a mensagem'); return; }
+        const destino = 'TODOS os '+(audience==='business'?'comércios':'motoboys');
+        if(!confirm(`Enviar essa mensagem para ${destino}? Não dá pra desfazer depois de enviada.`)) return;
+        const result = await api('POST', '/api/admin/messages', { audience, type, title: title.trim(), body: bodyText.trim(), ids: null });
+        if(result.error){ showToast(result.error); return; }
+        showToast('✅ Mensagem enviada para ' + result.message.targetCount + ' destinatário(s)');
+        await loadAll();
+        render();
+      };
+      const msgAudienceSelect = document.getElementById('msg-audience');
+      const msgTypeField = document.getElementById('msg-type-field');
+      if(msgAudienceSelect && msgTypeField){
+        const syncTypeVisibility = ()=>{ msgTypeField.style.display = msgAudienceSelect.value==='motoboy' ? 'none' : ''; };
+        msgAudienceSelect.onchange = syncTypeVisibility;
+        syncTypeVisibility();
+      }
     }
   }
 

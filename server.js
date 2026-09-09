@@ -181,12 +181,65 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
 }
 
 // ---------------------------------------------------------------
+// Free-credits promo — an admin can waive the per-ride credit charge for
+// a business, either indefinitely or until a given date. Computed fresh
+// every time (never trusted from a stale flag) so an expired promo stops
+// applying automatically, with no cron-style sweep needed to turn it off.
+// ---------------------------------------------------------------
+function hasFreeCredits(b) {
+  if (!b || !b.freeCredits || !b.freeCredits.active) return false;
+  if (b.freeCredits.until && Date.now() > b.freeCredits.until) return false;
+  return true;
+}
+
+// Turns a promo on/off for one business and logs it to freeCreditsHistory —
+// since this waives real charges, every activation/deactivation is recorded
+// with who (always 'admin' here) and when, so there's never a mystery about
+// why a business wasn't billed for a stretch of rides.
+function applyFreeCredits(b, { active, until }) {
+  const isActive = !!active;
+  const untilTs = until ? Number(until) : null;
+  b.freeCredits = { active: isActive, until: Number.isFinite(untilTs) ? untilTs : null };
+  if (!Array.isArray(b.freeCreditsHistory)) b.freeCreditsHistory = [];
+  b.freeCreditsHistory.unshift({
+    action: isActive ? 'ativado' : 'desativado',
+    until: b.freeCredits.until,
+    at: Date.now()
+  });
+  if (b.freeCreditsHistory.length > 20) b.freeCreditsHistory.length = 20; // recent history only
+}
+
+// ---------------------------------------------------------------
+// In-app notices — a lightweight inbox so an admin broadcast (promo or
+// maintenance heads-up) reaches every business/motoboy even without push
+// permission granted. Push is still attempted too (see notifyEntity) for
+// whoever did opt in; this is the fallback that reaches everyone else.
+// ---------------------------------------------------------------
+const NOTICE_CAP = 30; // keep each inbox small — this is a feed, not an archive
+function pushNotice(db, collectionName, id, { title, body, promo }) {
+  const entity = db[collectionName][id];
+  if (!entity) return;
+  if (!Array.isArray(entity.notices)) entity.notices = [];
+  entity.notices.unshift({
+    id: shortId('notice'),
+    title,
+    body,
+    promo: !!promo,
+    read: false,
+    createdAt: Date.now()
+  });
+  if (entity.notices.length > NOTICE_CAP) entity.notices.length = NOTICE_CAP;
+  notifyEntity(collectionName, id, { title, body, data: { type: 'admin-message' } });
+}
+
+// ---------------------------------------------------------------
 // Auth — hashed passwords (bcryptjs) + server-side session tokens.
 // Never store or return a plain-text password; never return passwordHash.
 // ---------------------------------------------------------------
 function sanitizeBusiness(b) {
   if (!b) return b;
   const { passwordHash, pushSubscriptions, ...rest } = b;
+  rest.freeCreditsEffective = hasFreeCredits(b); // computed, not the raw stored flag — see hasFreeCredits
   return rest;
 }
 function sanitizeMotoboy(m) {
@@ -402,6 +455,91 @@ app.patch('/api/admin/motoboys/:id/approve', requireAuth('admin'), (req, res) =>
   m.approved = !!req.body.approved;
   saveDB(db);
   res.json(sanitizeMotoboy(m));
+});
+
+// ---------------------------------------------------------------
+// Free-credits promo — waives CREDIT_COST_PER_RIDE for this business's
+// rides while active. `until` is an optional ms timestamp; leave it out
+// (or null) for a promo that stays on until an admin turns it off by hand.
+// Only makes sense for comércios (they're who spends credits per ride).
+// ---------------------------------------------------------------
+app.patch('/api/admin/businesses/:id/free-credits', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  applyFreeCredits(b, req.body || {});
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+// Same action across several businesses at once ("selecionar todos" no
+// painel) — one history entry per business, same as a individual toggle.
+app.post('/api/admin/businesses/free-credits-bulk', requireAuth('admin'), (req, res) => {
+  const { ids, active, until } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'Selecione ao menos um comércio' });
+  const db = loadDB();
+  let count = 0;
+  ids.forEach((id) => {
+    const b = db.businesses[id];
+    if (!b) return;
+    applyFreeCredits(b, { active, until });
+    count++;
+  });
+  saveDB(db);
+  res.json({ ok: true, count });
+});
+
+// ---------------------------------------------------------------
+// Admin broadcast messages — individual or coletivo, para comércios ou
+// motoboys. Mensagens promocionais só fazem sentido para comércios (são
+// quem gasta crédito); motoboys ainda podem receber avisos operacionais
+// (manutenção do app etc.) pelo mesmo mecanismo, só que sem o tipo promoção.
+// ---------------------------------------------------------------
+app.post('/api/admin/messages', requireAuth('admin'), (req, res) => {
+  const { audience, type, title, body, ids } = req.body || {};
+  if (audience !== 'business' && audience !== 'motoboy') {
+    return res.status(400).json({ error: 'Público inválido' });
+  }
+  const msgType = type === 'promocao' ? 'promocao' : 'aviso';
+  if (audience === 'motoboy' && msgType === 'promocao') {
+    return res.status(400).json({ error: 'Mensagens promocionais são só para comércios' });
+  }
+  if (!title || !title.trim() || !body || !body.trim()) {
+    return res.status(400).json({ error: 'Preencha o título e a mensagem' });
+  }
+  const db = loadDB();
+  const collectionName = audience === 'business' ? 'businesses' : 'motoboys';
+  const allIds = Object.keys(db[collectionName]);
+  const targetIds = Array.isArray(ids) && ids.length > 0 ? ids.filter((id) => db[collectionName][id]) : allIds;
+  if (targetIds.length === 0) return res.status(400).json({ error: 'Nenhum destinatário encontrado' });
+
+  targetIds.forEach((id) => {
+    pushNotice(db, collectionName, id, { title: title.trim(), body: body.trim(), promo: msgType === 'promocao' });
+  });
+
+  db.messages = db.messages || {};
+  const message = {
+    id: shortId('msg'),
+    audience,
+    type: msgType,
+    title: title.trim(),
+    body: body.trim(),
+    targetCount: targetIds.length,
+    allAudience: !(Array.isArray(ids) && ids.length > 0),
+    createdAt: Date.now()
+  };
+  db.messages[message.id] = message;
+  saveDB(db);
+  res.json({ ok: true, message });
+});
+
+// History of everything already sent — so an admin can check "já avisei
+// isso?" before firing off the same promo twice.
+app.get('/api/admin/messages', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.messages || {});
+  list.sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list.slice(0, 200));
 });
 
 // Permanently removes a business. Order history keeps working fine
@@ -661,6 +799,18 @@ app.delete('/api/businesses/:id/push-subscription', requireAuth('business'), (re
   res.json({ ok: true });
 });
 
+// Marks every in-app aviso as read (business opened the avisos screen) —
+// one request instead of one per notice, since they're always read together.
+app.post('/api/businesses/:id/notices/read-all', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  (b.notices || []).forEach((n) => { n.read = true; });
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
 app.post('/api/businesses/:id/change-password', requireAuth('business'), async (req, res) => {
   if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
   const { currentPassword, newPassword, confirmPassword } = req.body || {};
@@ -881,6 +1031,17 @@ app.delete('/api/motoboys/:id/push-subscription', requireAuth('motoboy'), (req, 
   m.pushSubscriptions = (m.pushSubscriptions || []).filter((s) => s.endpoint !== endpoint);
   saveDB(db);
   res.json({ ok: true });
+});
+
+// Marks every in-app aviso as read (motoboy opened the avisos screen).
+app.post('/api/motoboys/:id/notices/read-all', requireAuth('motoboy'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  (m.notices || []).forEach((n) => { n.read = true; });
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
 });
 
 app.post('/api/motoboys/:id/change-password', requireAuth('motoboy'), async (req, res) => {
@@ -1232,7 +1393,8 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   }
   const rideValue = parseFloat(value) || 0; // what the motoboy gets paid — unrelated to credits now
   const currentCredits = business.credits || 0;
-  if (currentCredits < CREDIT_COST_PER_RIDE) {
+  const freeNow = hasFreeCredits(business); // admin-granted free-credits promo — see hasFreeCredits
+  if (!freeNow && currentCredits < CREDIT_COST_PER_RIDE) {
     return res.status(402).json({
       error: `Créditos insuficientes (você tem ${currentCredits.toFixed(2)}) — adicione créditos para solicitar esta entrega.`,
       credits: currentCredits
@@ -1283,7 +1445,6 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     motoboyId: null,
     motoboyName: null,
     motoboyPhone: null,
-    creditsCharged: true,
     offerQueue,
     offerIndex: 0,
     offeredAt: offerQueue.length > 0 ? Date.now() : null,
@@ -1303,12 +1464,17 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   // Re-read the db in case anything else wrote in the meantime (geocoding awaited above).
   const freshDb = loadDB();
   const freshBusiness = freshDb.businesses[businessId];
-  if (!freshBusiness || (freshBusiness.credits || 0) < CREDIT_COST_PER_RIDE) {
+  if (!freshBusiness) return res.status(404).json({ error: 'Comércio não encontrado' });
+  const freeFinal = hasFreeCredits(freshBusiness); // re-checked fresh, same reasoning as freeNow above
+  if (!freeFinal && (freshBusiness.credits || 0) < CREDIT_COST_PER_RIDE) {
     return res.status(402).json({ error: 'Créditos insuficientes — adicione créditos para solicitar esta entrega.' });
   }
-  freshBusiness.credits -= CREDIT_COST_PER_RIDE;
+  order.creditsCharged = !freeFinal; // false for a free ride — nothing to refund later if it's canceled
+  if (!freeFinal) {
+    freshBusiness.credits -= CREDIT_COST_PER_RIDE;
+    addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
+  }
   freshDb.orders[order.id] = order;
-  addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
   saveDB(freshDb);
   notifyOfferedMotoboy(freshDb, order);
   res.json(order);
