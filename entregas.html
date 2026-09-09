@@ -1476,7 +1476,10 @@
     pollHandle = setInterval(async ()=>{
       // Don't disrupt any open form/sheet — re-rendering while the person
       // is typing would reset the field and make it look like it's blinking.
-      if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker) return;
+      // The profile screen has its own free-text inputs (name/phone/e-mail/
+      // password) that aren't behind a modal flag, so it needs the same
+      // protection.
+      if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile') return;
       await refreshOrders();
       await refreshProfile();
       render();

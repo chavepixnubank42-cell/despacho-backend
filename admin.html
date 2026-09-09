@@ -239,6 +239,11 @@
     stopPolling();
     pollHandle = setInterval(async ()=>{
       if(state.screen !== 'dash') return;
+      // Don't rebuild the screen while something is being typed — an edit
+      // form open, the free-credits/message modals, or the compose fields
+      // on the Mensagens tab (those aren't tracked in state, so a re-render
+      // would wipe them outright).
+      if(state.editingId || state.freeCreditsModal || state.messageModal || state.tab === 'mensagens') return;
       await loadAll();
       if(state.tab === 'relatorios') await loadReport();
       render();
