@@ -180,6 +180,15 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Soma valores em dinheiro pelo total em CENTAVOS (arredondando cada parcela
+// antes de somar), não em ponto flutuante puro — "0.1 + 0.2" no JavaScript dá
+// 0.30000000000000004, e somar várias entregas assim pode fazer o total
+// aparecer "faltando 1 centavo" mesmo com cada valor individual correto.
+function sumMoney(list, getter) {
+  const cents = list.reduce((s, item) => s + Math.round(((getter ? getter(item) : item) || 0) * 100), 0);
+  return cents / 100;
+}
+
 // ---------------------------------------------------------------
 // Free-credits promo — an admin can waive the per-ride credit charge for
 // a business, either indefinitely or until a given date. Computed fresh
@@ -338,6 +347,105 @@ app.get('/api/admin/orders', requireAuth('admin'), (req, res) => {
   res.json(list.slice(0, 500)); // plenty for a dashboard; avoids ever shipping an unbounded list
 });
 
+// Corridas com um chamado de suporte em aberto (motoboy reportou algo no
+// meio da entrega) — a tela de Suporte do admin escuta isso pra saber o
+// que ainda precisa de uma decisão (encerrar ou devolver pro comércio).
+app.get('/api/admin/support-tickets', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.orders)
+    .filter((o) => o.support && (req.query.status ? o.support.status === req.query.status : true))
+    .sort((a, b) => (b.support.reportedAt || 0) - (a.support.reportedAt || 0));
+  res.json(list.slice(0, 300));
+});
+
+// "Encerrar corrida" — o admin força o fim da corrida quando ela não tem
+// mais conserto (ex: motoboy relatou um problema sério). Funciona a partir
+// de qualquer status não-terminal, diferente do /cancel normal que só
+// aceita até 'no_local_retirada' — aqui é justamente pra destravar os
+// casos que o cancelamento comum não cobre. Estorna o crédito do comércio
+// se ele tinha sido cobrado, igual o cancelamento normal.
+app.post('/api/admin/orders/:id/end', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.status === 'entregue' || o.status === 'cancelado') {
+    return res.status(409).json({ error: 'Essa corrida já está finalizada.' });
+  }
+  if (o.creditsCharged) {
+    const business = db.businesses[o.businessId];
+    if (business) {
+      business.credits = (business.credits || 0) + CREDIT_COST_PER_RIDE;
+      addTransaction(db, o.businessId, 'credito', CREDIT_COST_PER_RIDE, 'Estorno — Entrega #' + o.id.slice(-6).toUpperCase() + ' encerrada pelo suporte', o.id);
+    }
+    o.creditsCharged = false;
+  }
+  o.status = 'cancelado';
+  o.cancelledAt = Date.now();
+  o.cancelledBy = 'admin';
+  o.cancelReason = (req.body && req.body.note) || 'Encerrada pelo suporte';
+  if (o.support && o.support.status === 'aberto') {
+    o.support.status = 'resolvido';
+    o.support.resolvedAt = Date.now();
+    o.support.resolvedAction = 'encerrada';
+    o.support.resolvedNote = (req.body && req.body.note) || null;
+  }
+  if (o.motoboyId) {
+    pushNotice(db, 'motoboys', o.motoboyId, {
+      title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' encerrada pelo suporte',
+      body: 'Nosso suporte encerrou essa corrida. Pode deixar o pedido de lado — se tiver dúvida, chame a gente.',
+      promo: false
+    });
+  }
+  saveDB(db);
+  res.json(o);
+});
+
+// "Voltar para o comércio" — tira o motoboy atual da corrida (mesmo já
+// tendo retirado o pedido) e devolve ela pra fila de ofertas, como se
+// fosse recém-criada; o motoboy leva o pedido de volta pro comércio, e um
+// outro motoboy (ou o mesmo, se for o único disponível) pode assumir do
+// zero. Não mexe em crédito — a corrida continua cobrada normalmente,
+// só muda quem está fazendo a entrega.
+app.post('/api/admin/orders/:id/requeue', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (!ACTIVE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Essa corrida não está com um motoboy em andamento no momento.' });
+  }
+  const previousMotoboyId = o.motoboyId;
+  o.declinedBy = Array.from(new Set([...(o.declinedBy || []), previousMotoboyId].filter(Boolean)));
+  o.status = 'pendente';
+  o.motoboyId = null;
+  o.motoboyName = null;
+  o.motoboyPhone = null;
+  o.acceptedAt = null;
+  o.arrivedPickupAt = null;
+  o.arrivedPickupGeo = null;
+  o.departedAt = null;
+  o.arrivedDeliveryAt = null;
+  o.arrivedDeliveryGeo = null;
+  o.returnDepartedAt = null;
+  o.arrivedReturnAt = null;
+  o.arrivedReturnGeo = null;
+  if (o.support && o.support.status === 'aberto') {
+    o.support.status = 'resolvido';
+    o.support.resolvedAt = Date.now();
+    o.support.resolvedAction = 'devolvida_ao_comercio';
+    o.support.resolvedNote = (req.body && req.body.note) || null;
+  }
+  if (previousMotoboyId) {
+    pushNotice(db, 'motoboys', previousMotoboyId, {
+      title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' devolvida ao comércio',
+      body: 'Nosso suporte pediu pra devolver o pedido no comércio — outro motoboy vai assumir a partir daí.',
+      promo: false
+    });
+  }
+  advanceOffer(db, o); // oferece pro próximo motoboy da fila, janela de 30s do zero
+  saveDB(db);
+  res.json(o);
+});
+
 app.get('/api/admin/summary', requireAuth('admin'), (req, res) => {
   const db = loadDB();
   const orders = Object.values(db.orders);
@@ -358,8 +466,8 @@ app.get('/api/admin/summary', requireAuth('admin'), (req, res) => {
     platformRevenue: delivered.length * CREDIT_COST_PER_RIDE,
     // Total paid out to motoboys so far (the `value` field on each order is
     // what the motoboy earns for it — set when the business creates the ride).
-    totalPaidToMotoboys: delivered.reduce((sum, o) => sum + (o.value || 0), 0),
-    creditsInCirculation: businesses.reduce((sum, b) => sum + (b.credits || 0), 0)
+    totalPaidToMotoboys: sumMoney(delivered, (o) => o.value),
+    creditsInCirculation: sumMoney(businesses, (b) => b.credits)
   });
 });
 
@@ -406,7 +514,7 @@ app.get('/api/admin/reports', requireAuth('admin'), (req, res) => {
       delivered: delivered.length,
       canceled: canceled.length,
       revenue: delivered.length * CREDIT_COST_PER_RIDE,
-      paidToMotoboys: delivered.reduce((sum, o) => sum + (o.value || 0), 0)
+      paidToMotoboys: sumMoney(delivered, (o) => o.value)
     };
   });
 
@@ -1162,7 +1270,7 @@ app.get('/api/businesses/:id/invoice', requireAuth('business'), (req, res) => {
     .sort((a, b) => a.deliveredAt - b.deliveredAt);
 
   const totalCreditsSpent = orders.length * CREDIT_COST_PER_RIDE;
-  const totalPaidToMotoboys = orders.reduce((sum, o) => sum + (o.value || 0), 0);
+  const totalPaidToMotoboys = sumMoney(orders, (o) => o.value);
 
   res.json({
     business: { name: business.name, email: business.email, phone: business.phone, address: business.address },
@@ -1575,6 +1683,54 @@ app.post('/api/orders/:id/give-up', requireAuth('motoboy'), (req, res) => {
   o.motoboyPhone = null;
   o.acceptedAt = null;
   advanceOffer(db, o); // hands it to the next motoboy in line, fresh 30s window
+  saveDB(db);
+  res.json(o);
+});
+
+// ---------------------------------------------------------------
+// Suporte — o motoboy usa isso quando algo dá errado NO MEIO da entrega
+// (endereço/localização errada, cliente não atende, acidente, etc.), ou
+// seja, depois de já ter retirado o pedido — é exatamente o cenário que
+// "give-up" não cobre (aquele só funciona antes da retirada). Isso não
+// resolve nada sozinho: só sinaliza pro admin, que decide encerrar a
+// corrida ou devolvê-la pro comércio (ver as duas rotas admin abaixo).
+// ---------------------------------------------------------------
+const SUPPORT_REASONS = ['endereco_errado', 'cliente_ausente', 'problema_pedido', 'acidente_emergencia', 'outro'];
+const SUPPORT_REASON_LABELS = {
+  endereco_errado: 'Endereço/localização errada',
+  cliente_ausente: 'Cliente não atende / não está no local',
+  problema_pedido: 'Problema com o pedido',
+  acidente_emergencia: 'Acidente ou emergência',
+  outro: 'Outro'
+};
+app.post('/api/orders/:id/support', requireAuth('motoboy'), (req, res) => {
+  const motoboyId = req.authId;
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== motoboyId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (!ACTIVE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Só dá pra pedir suporte numa corrida em andamento.' });
+  }
+  const { reason, note } = req.body || {};
+  if (!SUPPORT_REASONS.includes(reason)) return res.status(400).json({ error: 'Selecione um motivo válido' });
+  o.support = {
+    reason,
+    note: (note || '').trim() || null,
+    status: 'aberto',
+    reportedAt: Date.now(),
+    resolvedAt: null,
+    resolvedAction: null,
+    resolvedNote: null
+  };
+  const business = db.businesses[o.businessId];
+  if (business) {
+    pushNotice(db, 'businesses', o.businessId, {
+      title: 'Aviso sobre a entrega #' + o.id.slice(-6).toUpperCase(),
+      body: 'O motoboy reportou um problema: ' + (SUPPORT_REASON_LABELS[reason] || reason) + (note ? ' — ' + note.trim() : '') + '. Nosso suporte já foi avisado.',
+      promo: false
+    });
+  }
   saveDB(db);
   res.json(o);
 });

@@ -141,8 +141,10 @@
     selectedBusinessIds: new Set(),
     selectedMotoboyIds: new Set(),
     messages: [],
+    supportTickets: [],
     freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
-    messageModal: null // {audience, type, title, body, ids} while the compose dialog is open
+    messageModal: null, // {audience, type, title, body, ids} while the compose dialog is open
+    supportActionModal: null // {orderId, action:'end'|'requeue', note} while the support-action dialog is open
   };
 
   function esc(s){
@@ -215,18 +217,20 @@
   }
 
   async function loadAll(){
-    const [summary, businesses, motoboys, orders, messages] = await Promise.all([
+    const [summary, businesses, motoboys, orders, messages, supportTickets] = await Promise.all([
       api('GET', '/api/admin/summary'),
       api('GET', '/api/admin/businesses'),
       api('GET', '/api/admin/motoboys'),
       api('GET', '/api/admin/orders'),
-      api('GET', '/api/admin/messages')
+      api('GET', '/api/admin/messages'),
+      api('GET', '/api/admin/support-tickets')
     ]);
     if(!summary.error) state.summary = summary;
     if(Array.isArray(businesses)) state.businesses = businesses;
     if(Array.isArray(motoboys)) state.motoboys = motoboys;
     if(Array.isArray(orders)) state.orders = orders;
     if(Array.isArray(messages)) state.messages = messages;
+    if(Array.isArray(supportTickets)) state.supportTickets = supportTickets;
   }
 
   async function loadReport(){
@@ -243,7 +247,7 @@
       // form open, the free-credits/message modals, or the compose fields
       // on the Mensagens tab (those aren't tracked in state, so a re-render
       // would wipe them outright).
-      if(state.editingId || state.freeCreditsModal || state.messageModal || state.tab === 'mensagens') return;
+      if(state.editingId || state.freeCreditsModal || state.messageModal || state.supportActionModal || state.tab === 'mensagens') return;
       await loadAll();
       if(state.tab === 'relatorios') await loadReport();
       render();
@@ -373,10 +377,39 @@
     render();
   }
 
+  // ---------- suporte (corridas com problema reportado pelo motoboy) ----------
+  function openSupportActionModal(orderId, action){
+    state.supportActionModal = { orderId, action, note: '' };
+    render();
+  }
+  function closeSupportActionModal(){
+    state.supportActionModal = null;
+    render();
+  }
+  async function confirmSupportAction(){
+    const m = state.supportActionModal;
+    if(!m) return;
+    const isEnd = m.action === 'end';
+    const path = '/api/admin/orders/'+m.orderId+'/'+(isEnd?'end':'requeue');
+    const result = await api('POST', path, { note: m.note });
+    if(result.error){ showToast(result.error); return; }
+    showToast(isEnd ? '✅ Corrida encerrada' : '✅ Corrida devolvida para o comércio — buscando outro motoboy');
+    state.supportActionModal = null;
+    await loadAll();
+    render();
+  }
+
   const STATUS_LABELS = {
     pendente:'Procurando motoboy', aceito:'Aceita', no_local_retirada:'Na retirada',
     em_entrega:'Em entrega', no_local_entrega:'No destino', retornando:'🔁 Voltando', no_local_retorno:'🔁 De volta na retirada',
     entregue:'Entregue', cancelado:'Cancelada'
+  };
+  const SUPPORT_REASON_LABELS = {
+    endereco_errado: 'Endereço/localização errada',
+    cliente_ausente: 'Cliente não atende / não está no local',
+    problema_pedido: 'Problema com o pedido',
+    acidente_emergencia: 'Acidente ou emergência',
+    outro: 'Outro'
   };
 
   function renderLogin(){
@@ -536,6 +569,35 @@
           </div>
         </div>
       `).join('') || '<p class="empty">Nenhuma corrida ainda.</p>';
+    } else if(state.tab === 'suporte'){
+      const abertos = (state.supportTickets||[]).filter(t=>t.support.status==='aberto');
+      const resolvidos = (state.supportTickets||[]).filter(t=>t.support.status==='resolvido').slice(0,20);
+      const ticketRow = (o, isOpen) => `
+        <div class="row" style="flex-direction:column;align-items:stretch;${isOpen?'border-color:var(--orange, #ff6a3d);':''}">
+          <div class="row-main">
+            <strong>#${o.id.slice(-6).toUpperCase()}</strong>
+            <span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ ${esc(SUPPORT_REASON_LABELS[o.support.reason]||o.support.reason)}</span>
+            <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
+            <div class="row-sub">🏬 ${esc(o.businessName||'')} · 🏍️ ${esc(o.motoboyName||'sem motoboy no momento')}</div>
+            <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
+            ${o.support.note ? `<div class="row-sub">💬 "${esc(o.support.note)}"</div>` : ''}
+            <div class="row-sub">Reportado em ${formatDateTime(o.support.reportedAt)}</div>
+            ${!isOpen ? `<div class="row-sub">Resolvido em ${formatDateTime(o.support.resolvedAt)} · ação: ${o.support.resolvedAction==='encerrada'?'corrida encerrada':'devolvida ao comércio'}${o.support.resolvedNote?' · nota: "'+esc(o.support.resolvedNote)+'"':''}</div>` : ''}
+          </div>
+          ${isOpen ? `
+          <div class="row-actions" style="margin-top:10px;">
+            <button class="btn-ghost btn-danger" data-support-end="${o.id}">Encerrar corrida</button>
+            <button class="btn-ghost btn-ok" data-support-requeue="${o.id}">Voltar para o comércio</button>
+          </div>
+          ` : ''}
+        </div>
+      `;
+      body = `
+        <p class="eyebrow">Chamados abertos</p>
+        ${abertos.length ? abertos.map(o=>ticketRow(o,true)).join('') : '<p class="empty">Nenhum chamado de suporte em aberto no momento.</p>'}
+        <p class="eyebrow" style="margin-top:22px;">Últimos resolvidos</p>
+        ${resolvidos.length ? resolvidos.map(o=>ticketRow(o,false)).join('') : '<p class="empty">Nenhum chamado resolvido ainda.</p>'}
+      `;
     } else if(state.tab === 'mensagens'){
       body = `
         <div class="row" style="flex-direction:column;align-items:stretch;">
@@ -610,6 +672,7 @@
         ${tabBtn('comercios','Comércios')}
         ${tabBtn('motoboys','Motoboys')}
         ${tabBtn('corridas','Corridas')}
+        ${tabBtn('suporte', 'Suporte' + ((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length ? ' ('+(state.supportTickets||[]).filter(t=>t.support.status==='aberto').length+')' : ''))}
         ${tabBtn('mensagens','Mensagens')}
         ${tabBtn('relatorios','Relatórios')}
       </div>
@@ -665,6 +728,28 @@
             <div style="display:flex;gap:8px;margin-top:6px;">
               <button class="btn btn-ok" id="btn-confirm-message">Enviar</button>
               <button class="btn-ghost" id="btn-cancel-message">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    if(state.supportActionModal){
+      const m = state.supportActionModal;
+      const isEnd = m.action === 'end';
+      html += `
+        <div class="modal-overlay" id="modal-overlay-3">
+          <div class="modal-box">
+            <h2>${isEnd ? '🛑 Encerrar corrida' : '↩️ Voltar para o comércio'}</h2>
+            <p class="row-sub" style="margin-bottom:14px;">${isEnd
+              ? 'A corrida será cancelada e o crédito do comércio será estornado se tiver sido cobrado.'
+              : 'O motoboy atual sai da corrida e ela volta para a fila de ofertas, como se fosse recém-criada, para outro motoboy assumir.'}</p>
+            <div class="field">
+              <label>Nota (opcional, fica registrada no chamado)</label>
+              <textarea id="support-action-note" placeholder="Ex: falamos com o motoboy, endereço confirmado com o cliente">${esc(m.note||'')}</textarea>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn ${isEnd?'btn-danger':'btn-ok'}" id="btn-confirm-support-action">Confirmar</button>
+              <button class="btn-ghost" id="btn-cancel-support-action">Cancelar</button>
             </div>
           </div>
         </div>
@@ -811,6 +896,22 @@
       };
       const cancelMessage = document.getElementById('btn-cancel-message');
       if(cancelMessage) cancelMessage.onclick = closeMessageModal;
+
+      // ---------- suporte: encerrar corrida / voltar para o comércio ----------
+      root.querySelectorAll('[data-support-end]').forEach(el=>{
+        el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-end'), 'end');
+      });
+      root.querySelectorAll('[data-support-requeue]').forEach(el=>{
+        el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-requeue'), 'requeue');
+      });
+      const confirmSupportActionBtn = document.getElementById('btn-confirm-support-action');
+      if(confirmSupportActionBtn) confirmSupportActionBtn.onclick = ()=>{
+        const noteField = document.getElementById('support-action-note');
+        if(noteField) state.supportActionModal.note = noteField.value;
+        confirmSupportAction();
+      };
+      const cancelSupportActionBtn = document.getElementById('btn-cancel-support-action');
+      if(cancelSupportActionBtn) cancelSupportActionBtn.onclick = closeSupportActionModal;
 
       // ---------- aba mensagens: envio de broadcast para todos ----------
       const sendBroadcast = document.getElementById('btn-send-broadcast');

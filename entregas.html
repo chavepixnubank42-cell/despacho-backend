@@ -389,6 +389,11 @@
     cursor:pointer;
   }
   .link-muted:hover{color:var(--text);}
+  .support-flag{
+    margin-top:10px; text-align:center; font-size:12px; font-family:var(--font-mono);
+    color:var(--orange,#FF6A3D); background:rgba(255,106,61,0.1);
+    border:1px solid var(--orange,#FF6A3D); border-radius:8px; padding:8px 10px;
+  }
 
   .existing-list{display:flex;flex-direction:column;gap:8px;}
   .existing-item{
@@ -1043,6 +1048,14 @@
   function esc(s){
     return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+  // Soma valores em dinheiro pelo total em CENTAVOS (arredondando cada parcela
+  // antes de somar), não em ponto flutuante puro — "0.1 + 0.2" no JavaScript
+  // dá 0.30000000000000004, e somar várias entregas assim pode fazer o total
+  // aparecer "faltando 1 centavo" mesmo com todo mundo correto individualmente.
+  function sumMoney(list, getter){
+    const cents = list.reduce((s,o)=> s + Math.round(((getter ? getter(o) : o) || 0) * 100), 0);
+    return cents / 100;
+  }
   function formatMoney(v){
     const n = parseFloat(v)||0;
     return 'R$ ' + n.toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -1302,6 +1315,7 @@
     topupPix: null, // {paymentId, qrCodeBase64, qrCode} once a Pix has been generated
     incomingAlert: null, // order object for the big banner shown to an online motoboy
     cancelModal: null, // {orderId, reason, note} while the cancel-reason sheet is open
+    supportModal: null, // {orderId, reason, note} while the support sheet is open
     rateModal: null, // {orderId, stars, comment} while the rating sheet is open
     myRatingSummary: null, // {average, count} for whoever is logged in
     historyDateFilter: 'todas', // hoje | 7dias | 30dias | todas
@@ -1479,7 +1493,7 @@
       // The profile screen has its own free-text inputs (name/phone/e-mail/
       // password) that aren't behind a modal flag, so it needs the same
       // protection.
-      if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile') return;
+      if(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile') return;
       await refreshOrders();
       await refreshProfile();
       render();
@@ -1664,6 +1678,7 @@
     state.locationPickerCoords = mode === 'order-delivery'
       ? (state.newOrderDeliveryCoords || null)
       : ((state.profile && state.profile.preciseCoords) || null);
+    let typedAddress = '';
     if(mode === 'order-delivery'){
       const form = $('#form-new-order');
       if(form){
@@ -1677,10 +1692,31 @@
           roundTrip: !!(roundTripBox && roundTripBox.checked)
         };
       }
+      typedAddress = (state.newOrderFormSnapshot && state.newOrderFormSnapshot.deliveryAddress || '').trim();
     }
     render();
-    // GPS só pra centralizar o mapa num ponto próximo — não é a resposta final.
-    if(!state.locationPickerCoords && navigator.geolocation){
+    if(state.locationPickerCoords) return; // já tem um pino salvo — abre exatamente onde a pessoa deixou da última vez
+
+    if(mode === 'order-delivery' && typedAddress.length >= 8){
+      // Já sabemos o endereço que a pessoa digitou — geocodifica ele e já
+      // começa o pino ali, em vez de abrir o mapa vazio esperando a pessoa
+      // buscar de novo. O GPS do aparelho não ajuda aqui: é o endereço do
+      // cliente, não de quem está com o celular na mão.
+      apiGet('/api/geocode-search?q='+encodeURIComponent(typedAddress)).then(data=>{
+        const results = (data && data.results) || [];
+        if(results[0] && locationPickerMap && locationPickerMarker && !state.newOrderDeliveryCoords){
+          const c = [results[0].lat, results[0].lng];
+          locationPickerMap.setView(c, 17);
+          locationPickerMarker.setLatLng(c);
+        }
+      }).catch(()=>{ /* geocodificação falhou — a pessoa ajusta manualmente */ });
+      return;
+    }
+
+    // Localização da própria loja (mode 'business') — aí sim o GPS do
+    // aparelho é um bom ponto de partida, já que quem está segurando o
+    // celular é quem está na loja.
+    if(mode !== 'order-delivery' && navigator.geolocation){
       navigator.geolocation.getCurrentPosition(
         (pos)=>{
           if(locationPickerMap){
@@ -2049,6 +2085,39 @@
     showToast('Corrida cancelada');
   }
 
+  // ---------- suporte (motoboy reporta um problema no meio da corrida) ----------
+  const SUPPORT_REASONS = [
+    {id:'endereco_errado', label:'Endereço/localização errada'},
+    {id:'cliente_ausente', label:'Cliente não atende / não está no local'},
+    {id:'problema_pedido', label:'Problema com o pedido'},
+    {id:'acidente_emergencia', label:'Acidente ou emergência'},
+    {id:'outro', label:'Outro'}
+  ];
+  function openSupportModal(orderId){
+    state.supportModal = {orderId, reason:null, note:''};
+    render();
+  }
+  function closeSupportModal(){
+    state.supportModal = null;
+    render();
+  }
+  async function confirmSupport(){
+    const sm = state.supportModal;
+    if(!sm || !sm.reason) return;
+    const btn = root.querySelector('#btn-confirm-support');
+    if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+    const result = await apiPost('/api/orders/'+sm.orderId+'/support', {reason: sm.reason, note: sm.note});
+    if(result.error){
+      showToast(result.error);
+      if(btn){ btn.disabled = false; btn.textContent = 'Avisar o suporte'; }
+      return;
+    }
+    state.supportModal = null;
+    await refreshOrders();
+    render();
+    showToast('✅ Suporte avisado — alguém vai te ajudar em breve');
+  }
+
   function openRateModal(orderId){
     state.rateModal = {orderId, stars:0, comment:''};
     render();
@@ -2153,6 +2222,9 @@
     }
     if(state.cancelModal){
       root.appendChild(renderCancelModal());
+    }
+    if(state.supportModal){
+      root.appendChild(renderSupportModal());
     }
     if(state.showSoundPicker){
       root.appendChild(renderSoundPickerModal());
@@ -2606,7 +2678,7 @@
     const allOrders = state.orders.filter(o => o.businessId === state.myId);
     const concluidas = allOrders.filter(o=>o.status==='entregue');
     const canceladas = allOrders.filter(o=>o.status==='cancelado');
-    const totalGasto = concluidas.reduce((s,o)=>s+o.value,0);
+    const totalGasto = sumMoney(concluidas, o=>o.value);
 
     d.innerHTML = `
       <p class="eyebrow">Histórico</p>
@@ -2646,10 +2718,10 @@
     const entregues = allOrders.filter(o=>o.status==='entregue');
     const hojeStart = startOfToday(), weekStart = startOfWeek(), monthStart = startOfMonth();
     const concluidasHoje = entregues.filter(o=>o.deliveredAt>=hojeStart);
-    const ganhoHoje = concluidasHoje.reduce((s,o)=>s+o.value,0);
-    const ganhoSemana = entregues.filter(o=>o.deliveredAt>=weekStart).reduce((s,o)=>s+o.value,0);
-    const ganhoMes = entregues.filter(o=>o.deliveredAt>=monthStart).reduce((s,o)=>s+o.value,0);
-    const ganhoTotal = entregues.reduce((s,o)=>s+o.value,0);
+    const ganhoHoje = sumMoney(concluidasHoje, o=>o.value);
+    const ganhoSemana = sumMoney(entregues.filter(o=>o.deliveredAt>=weekStart), o=>o.value);
+    const ganhoMes = sumMoney(entregues.filter(o=>o.deliveredAt>=monthStart), o=>o.value);
+    const ganhoTotal = sumMoney(entregues, o=>o.value);
 
     d.innerHTML = `
       <p class="eyebrow">Meus ganhos</p>
@@ -2700,7 +2772,7 @@
 
     const pendentes = ativas.filter(o=>o.status==='pendente').length;
     const aCaminho = ativas.filter(o=>ACTIVE_STATUSES.includes(o.status)).length;
-    const gasto = finalizadas.reduce((s,o)=>s+o.value,0);
+    const gasto = sumMoney(finalizadas, o=>o.value);
     const credits = state.profile.credits || 0;
 
     d.innerHTML = `
@@ -2777,7 +2849,7 @@
     const ativa = allMine.filter(o=>ACTIVE_STATUSES.includes(o.status));
     const finalizadas = allMine.filter(o=>o.status==='entregue');
     const canceladas = allMine.filter(o=>o.status==='cancelado');
-    const ganho = finalizadas.reduce((s,o)=>s+o.value,0);
+    const ganho = sumMoney(finalizadas, o=>o.value);
     // Only one active ride at a time.
     const activeOrder = ativa[0] || null;
     if(!activeOrder) stopGeoWatch();
@@ -2892,6 +2964,13 @@
   function renderActiveRideBanner(o){
     const cancelLink = `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-cancel="${o.id}">Cancelar corrida</span></div>`;
     const giveUpLink = `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-give-up="${o.id}">Devolver corrida (não posso mais fazer)</span></div>`;
+    // Some kind of problem happened DURING the delivery (wrong address,
+    // customer unreachable, accident...) — different from give-up/cancel,
+    // which only make sense before the package is picked up. This just
+    // flags it for the support team; it doesn't resolve anything by itself.
+    const supportLink = o.support && o.support.status === 'aberto'
+      ? `<div class="support-flag">⚠️ Suporte avisado — aguardando retorno</div>`
+      : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>`;
     if(o.status === 'aceito'){
       return `
         <div class="active-ride" id="active-ride-banner">
@@ -2903,6 +2982,7 @@
           ${renderAddressLine(o.pickupAddress)}
           ${renderGpsLock(o, 'pickupCoords', 'pickup', 'data-arrive-pickup', '📍 Cheguei na retirada')}
           ${giveUpLink}
+          ${supportLink}
         </div>
       `;
     }
@@ -2917,6 +2997,7 @@
           <div class="active-ride-hint">Colete o pedido e toque em sair quando estiver pronto.</div>
           <button class="btn-stage" data-depart="${o.id}">🚀 Saí para a entrega</button>
           ${cancelLink}
+          ${supportLink}
         </div>
       `;
     }
@@ -2930,6 +3011,7 @@
           <div class="active-ride-sub">até a entrega</div>
           ${renderAddressLine(o.deliveryAddress)}
           ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei na entrega')}
+          ${supportLink}
         </div>
       `;
     }
@@ -2944,6 +3026,7 @@
             ${renderAddressLine(o.deliveryAddress)}
             <div class="active-ride-hint">🔁 Essa corrida é ida e volta. Entregue/pegue o que for necessário e toque em voltar quando estiver pronto.</div>
             <button class="btn-stage" style="width:100%;margin-top:10px;" data-depart-return="${o.id}">🔁 Voltar para a retirada</button>
+            ${supportLink}
           </div>
         `;
       }
@@ -2955,6 +3038,7 @@
           ${renderAddressLine(o.deliveryAddress)}
           <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
           <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
+          ${supportLink}
         </div>
       `;
     }
@@ -2966,6 +3050,7 @@
           </div>
           ${renderAddressLine(o.pickupAddress)}
           ${renderGpsLock(o, 'pickupCoords', 'return', 'data-arrive-return', '📍 Cheguei de volta')}
+          ${supportLink}
         </div>
       `;
     }
@@ -2979,6 +3064,7 @@
         ${renderAddressLine(o.pickupAddress)}
         <div class="active-ride-hint">Chegou de volta — confirme para concluir a corrida.</div>
         <button class="btn-deliver" style="width:100%;margin-top:10px;" data-complete-return="${o.id}">✅ Concluir corrida</button>
+        ${supportLink}
       </div>
     `;
   }
@@ -3245,6 +3331,50 @@
           <div class="ticket-actions">
             <button class="btn-secondary" id="btn-cancel-back-reason">Voltar</button>
             <button class="btn-cancel-confirm" id="btn-confirm-cancel">Confirmar cancelamento</button>
+          </div>
+        </div>
+      `;
+    }
+    return backdrop;
+  }
+
+  function renderSupportModal(){
+    const sm = state.supportModal;
+    const backdrop = document.createElement('div');
+    backdrop.className='modal-backdrop';
+    backdrop.id='support-backdrop';
+
+    if(!sm.reason){
+      // Passo 1: qual o problema.
+      backdrop.innerHTML = `
+        <div class="modal-sheet">
+          <div class="modal-head">
+            <span class="modal-title">⚠️ O que aconteceu?</span>
+            <button class="modal-close" id="support-close">✕</button>
+          </div>
+          <p class="page-sub" style="margin-bottom:14px;">Isso avisa nosso suporte — não cancela nem encerra a corrida sozinho, alguém vai te orientar em seguida.</p>
+          <div class="reason-list">
+            ${SUPPORT_REASONS.map(r => `<button class="reason-btn" data-pick-support-reason="${r.id}">${esc(r.label)}</button>`).join('')}
+          </div>
+        </div>
+      `;
+    } else {
+      // Passo 2: observação opcional + confirmação.
+      const label = (SUPPORT_REASONS.find(r=>r.id===sm.reason)||{}).label || sm.reason;
+      backdrop.innerHTML = `
+        <div class="modal-sheet">
+          <div class="modal-head">
+            <span class="modal-title">Confirmar aviso ao suporte</span>
+            <button class="modal-close" id="support-close">✕</button>
+          </div>
+          <p class="page-sub" style="margin-bottom:14px;">Motivo: <strong style="color:var(--text);">${esc(label)}</strong></p>
+          <div class="field">
+            <label>Detalhes (opcional)</label>
+            <textarea id="support-note" placeholder="Conte rapidamente o que está acontecendo">${esc(sm.note||'')}</textarea>
+          </div>
+          <div class="ticket-actions">
+            <button class="btn-secondary" id="btn-support-back-reason">Voltar</button>
+            <button class="btn-cancel-confirm" id="btn-confirm-support">Avisar o suporte</button>
           </div>
         </div>
       `;
@@ -3598,6 +3728,23 @@
     const btnConfirmCancel = $('#btn-confirm-cancel');
     if(btnConfirmCancel) btnConfirmCancel.onclick = confirmCancel;
 
+    root.querySelectorAll('[data-open-support]').forEach(elm=>{
+      elm.onclick = ()=>openSupportModal(elm.getAttribute('data-open-support'));
+    });
+    const supportClose = $('#support-close');
+    if(supportClose) supportClose.onclick = closeSupportModal;
+    const supportBackdrop = $('#support-backdrop');
+    if(supportBackdrop) supportBackdrop.onclick = (e)=>{ if(e.target===supportBackdrop) closeSupportModal(); };
+    root.querySelectorAll('[data-pick-support-reason]').forEach(elm=>{
+      elm.onclick = ()=>{ state.supportModal.reason = elm.getAttribute('data-pick-support-reason'); render(); };
+    });
+    const supportBackReason = $('#btn-support-back-reason');
+    if(supportBackReason) supportBackReason.onclick = ()=>{ state.supportModal.reason = null; render(); };
+    const supportNoteField = $('#support-note');
+    if(supportNoteField) supportNoteField.oninput = (e)=>{ state.supportModal.note = e.target.value; };
+    const btnConfirmSupport = $('#btn-confirm-support');
+    if(btnConfirmSupport) btnConfirmSupport.onclick = confirmSupport;
+
     root.querySelectorAll('[data-open-rate]').forEach(elm=>{
       elm.onclick = ()=>openRateModal(elm.getAttribute('data-open-rate'));
     });
@@ -3714,7 +3861,7 @@
   // Mobile browsers throttle background tabs — catch up the moment the
   // app becomes visible/foreground again instead of waiting for the next tick.
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState === 'visible' && state.profile && !(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.showLocationPicker)){
+    if(document.visibilityState === 'visible' && state.profile && !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker)){
       refreshOrders().then(render);
     }
   });
