@@ -400,48 +400,37 @@ app.post('/api/admin/orders/:id/end', requireAuth('admin'), (req, res) => {
   res.json(o);
 });
 
-// "Voltar para o comércio" — tira o motoboy atual da corrida (mesmo já
-// tendo retirado o pedido) e devolve ela pra fila de ofertas, como se
-// fosse recém-criada; o motoboy leva o pedido de volta pro comércio, e um
-// outro motoboy (ou o mesmo, se for o único disponível) pode assumir do
-// zero. Não mexe em crédito — a corrida continua cobrada normalmente,
-// só muda quem está fazendo a entrega.
-app.post('/api/admin/orders/:id/requeue', requireAuth('admin'), (req, res) => {
+// "Voltar para o comércio" — o admin avança a MESMA corrida, com o MESMO
+// motoboy, direto pro estado "retornando" — como se estivesse mexendo no
+// painel do próprio motoboy e apertasse o botão de voltar depois de
+// entregar (mesmo fluxo de "ida e volta" que já existe). Não passa pra
+// outro motoboy, e não fecha a corrida sozinho: ele ainda precisa chegar
+// de volta e confirmar normalmente pra concluir. Também liga o campo
+// roundTrip nessa corrida (mesmo que ela não tenha começado assim),
+// porque é esse campo que libera as etapas de retorno no app dele.
+app.post('/api/admin/orders/:id/return-to-business', requireAuth('admin'), (req, res) => {
   const db = loadDB();
   const o = db.orders[req.params.id];
   if (!o) return res.status(404).json({ error: 'Não encontrado' });
-  if (!ACTIVE_STATUSES.includes(o.status)) {
-    return res.status(409).json({ error: 'Essa corrida não está com um motoboy em andamento no momento.' });
+  if (!o.motoboyId) return res.status(409).json({ error: 'Essa corrida não está com um motoboy no momento.' });
+  const FORCEABLE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
+  if (!FORCEABLE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Essa corrida já está voltando ou já foi finalizada.' });
   }
-  const previousMotoboyId = o.motoboyId;
-  o.declinedBy = Array.from(new Set([...(o.declinedBy || []), previousMotoboyId].filter(Boolean)));
-  o.status = 'pendente';
-  o.motoboyId = null;
-  o.motoboyName = null;
-  o.motoboyPhone = null;
-  o.acceptedAt = null;
-  o.arrivedPickupAt = null;
-  o.arrivedPickupGeo = null;
-  o.departedAt = null;
-  o.arrivedDeliveryAt = null;
-  o.arrivedDeliveryGeo = null;
-  o.returnDepartedAt = null;
-  o.arrivedReturnAt = null;
-  o.arrivedReturnGeo = null;
+  o.roundTrip = true;
+  o.status = 'retornando';
+  o.returnDepartedAt = Date.now();
   if (o.support && o.support.status === 'aberto') {
     o.support.status = 'resolvido';
     o.support.resolvedAt = Date.now();
-    o.support.resolvedAction = 'devolvida_ao_comercio';
+    o.support.resolvedAction = 'retorno_forcado';
     o.support.resolvedNote = (req.body && req.body.note) || null;
   }
-  if (previousMotoboyId) {
-    pushNotice(db, 'motoboys', previousMotoboyId, {
-      title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' devolvida ao comércio',
-      body: 'Nosso suporte pediu pra devolver o pedido no comércio — outro motoboy vai assumir a partir daí.',
-      promo: false
-    });
-  }
-  advanceOffer(db, o); // oferece pro próximo motoboy da fila, janela de 30s do zero
+  pushNotice(db, 'motoboys', o.motoboyId, {
+    title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' — volte para o comércio',
+    body: 'Nosso suporte pediu pra você voltar com o pedido/pagamento pro comércio agora. Quando chegar, confirme normalmente pra concluir a corrida.',
+    promo: false
+  });
   saveDB(db);
   res.json(o);
 });

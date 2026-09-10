@@ -144,7 +144,7 @@
     supportTickets: [],
     freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
     messageModal: null, // {audience, type, title, body, ids} while the compose dialog is open
-    supportActionModal: null // {orderId, action:'end'|'requeue', note} while the support-action dialog is open
+    supportActionModal: null // {orderId, action:'end'|'return', note} while the support-action dialog is open
   };
 
   function esc(s){
@@ -390,10 +390,10 @@
     const m = state.supportActionModal;
     if(!m) return;
     const isEnd = m.action === 'end';
-    const path = '/api/admin/orders/'+m.orderId+'/'+(isEnd?'end':'requeue');
+    const path = '/api/admin/orders/'+m.orderId+'/'+(isEnd?'end':'return-to-business');
     const result = await api('POST', path, { note: m.note });
     if(result.error){ showToast(result.error); return; }
-    showToast(isEnd ? '✅ Corrida encerrada' : '✅ Corrida devolvida para o comércio — buscando outro motoboy');
+    showToast(isEnd ? '✅ Corrida encerrada' : '✅ Motoboy avisado — voltando para o comércio');
     state.supportActionModal = null;
     await loadAll();
     render();
@@ -582,12 +582,12 @@
             <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
             ${o.support.note ? `<div class="row-sub">💬 "${esc(o.support.note)}"</div>` : ''}
             <div class="row-sub">Reportado em ${formatDateTime(o.support.reportedAt)}</div>
-            ${!isOpen ? `<div class="row-sub">Resolvido em ${formatDateTime(o.support.resolvedAt)} · ação: ${o.support.resolvedAction==='encerrada'?'corrida encerrada':'devolvida ao comércio'}${o.support.resolvedNote?' · nota: "'+esc(o.support.resolvedNote)+'"':''}</div>` : ''}
+            ${!isOpen ? `<div class="row-sub">Resolvido em ${formatDateTime(o.support.resolvedAt)} · ação: ${o.support.resolvedAction==='encerrada'?'corrida encerrada':'motoboy mandado voltar ao comércio'}${o.support.resolvedNote?' · nota: "'+esc(o.support.resolvedNote)+'"':''}</div>` : ''}
           </div>
           ${isOpen ? `
           <div class="row-actions" style="margin-top:10px;">
             <button class="btn-ghost btn-danger" data-support-end="${o.id}">Encerrar corrida</button>
-            <button class="btn-ghost btn-ok" data-support-requeue="${o.id}">Voltar para o comércio</button>
+            <button class="btn-ghost btn-ok" data-support-return="${o.id}">Voltar para o comércio</button>
           </div>
           ` : ''}
         </div>
@@ -742,7 +742,7 @@
             <h2>${isEnd ? '🛑 Encerrar corrida' : '↩️ Voltar para o comércio'}</h2>
             <p class="row-sub" style="margin-bottom:14px;">${isEnd
               ? 'A corrida será cancelada e o crédito do comércio será estornado se tiver sido cobrado.'
-              : 'O motoboy atual sai da corrida e ela volta para a fila de ofertas, como se fosse recém-criada, para outro motoboy assumir.'}</p>
+              : 'O mesmo motoboy avança pro estado "retornando" — como se estivesse voltando pro comércio com o pedido/pagamento. A corrida não fecha sozinha: ele ainda confirma a chegada de volta pra concluir, do jeito de sempre.'}</p>
             <div class="field">
               <label>Nota (opcional, fica registrada no chamado)</label>
               <textarea id="support-action-note" placeholder="Ex: falamos com o motoboy, endereço confirmado com o cliente">${esc(m.note||'')}</textarea>
@@ -901,8 +901,8 @@
       root.querySelectorAll('[data-support-end]').forEach(el=>{
         el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-end'), 'end');
       });
-      root.querySelectorAll('[data-support-requeue]').forEach(el=>{
-        el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-requeue'), 'requeue');
+      root.querySelectorAll('[data-support-return]').forEach(el=>{
+        el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-return'), 'return');
       });
       const confirmSupportActionBtn = document.getElementById('btn-confirm-support-action');
       if(confirmSupportActionBtn) confirmSupportActionBtn.onclick = ()=>{
