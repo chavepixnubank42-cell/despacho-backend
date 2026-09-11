@@ -38,12 +38,21 @@
     --font-mono:'IBM Plex Mono', monospace;
   }
   *{box-sizing:border-box;}
+  html{
+    /* Stops the browser's native "pull down to reload" gesture from
+       firing a full page reload — without this, pulling down anywhere
+       near the top of the page reloads the whole app (and used to look
+       exactly like being logged out, back when the session wasn't
+       actually being saved anywhere — see the storage helpers below). */
+    overscroll-behavior-y: contain;
+  }
   body{
     margin:0;
     background:var(--bg);
     color:var(--text);
     font-family:var(--font-body);
     -webkit-font-smoothing:antialiased;
+    overscroll-behavior-y: contain;
   }
   #app{
     max-width:520px;
@@ -1007,9 +1016,9 @@
   }
 
   // ---------- storage helpers ----------
-  // Wraps a promise so it always settles within `ms`, even if the storage
-  // bridge never responds — this is what previously made "Cadastrar" hang
-  // forever with no feedback.
+  // Wraps a promise so it always settles within `ms`, even if the network
+  // request never responds — this is what previously made things hang
+  // forever with no feedback. Still used by the fetch() calls below.
   function withTimeout(promise, ms){
     return new Promise((resolve)=>{
       let done = false;
@@ -1021,26 +1030,30 @@
       });
     });
   }
-  async function getJSON(key, shared){
-    if(!window.storage) return null;
+
+  // Device-local settings (session token, chosen API server, sound
+  // preference) live in localStorage — synchronous, and reliably kept by
+  // the browser itself across reloads, pull-to-refresh, and reopening the
+  // installed app.
+  //
+  // This used to go through window.storage instead, which only exists
+  // inside the Claude.ai Artifacts sandbox — outside of it (i.e. on this
+  // app's real, published address) it's simply undefined, so every
+  // getJSON/setJSON call silently did nothing. Nothing was ever actually
+  // being saved on a real phone, so every fresh page load (pulling down to
+  // refresh, reopening the app icon) looked exactly like being logged out.
+  function getJSON(key){
     try{
-      const r = await withTimeout(window.storage.get(key, !!shared), 3500);
-      return r ? JSON.parse(r.value) : null;
-    }catch(e){ console.error('storage.get falhou', key, e); return null; }
+      const raw = localStorage.getItem(key);
+      return Promise.resolve(raw === null ? null : JSON.parse(raw));
+    }catch(e){ console.error('localStorage.getItem falhou', key, e); return Promise.resolve(null); }
   }
-  async function setJSON(key, value, shared){
-    if(!window.storage) return false;
+  function setJSON(key, value){
     try{
-      const r = await withTimeout(window.storage.set(key, JSON.stringify(value), !!shared), 3500);
-      return !!r;
-    }catch(e){ console.error('storage.set falhou', key, e); return false; }
-  }
-  async function listKeys(prefix, shared){
-    if(!window.storage) return [];
-    try{
-      const r = await withTimeout(window.storage.list(prefix, !!shared), 3500);
-      return r ? r.keys : [];
-    }catch(e){ console.error('storage.list falhou', prefix, e); return []; }
+      if(value === null || value === undefined) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(value));
+      return Promise.resolve(true);
+    }catch(e){ console.error('localStorage.setItem falhou', key, e); return Promise.resolve(false); }
   }
   function newId(prefix){
     return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
@@ -1102,10 +1115,9 @@
   }
 
   // ---------- backend API helpers ----------
-  // All shared data (businesses, motoboys, orders) now lives on your own
-  // server instead of window.storage. window.storage is still used only for
-  // the API server address and the session token — both purely local to
-  // this device/browser.
+  // All shared data (businesses, motoboys, orders) lives on your own
+  // server. localStorage is used only for the API server address and the
+  // session token — both purely local to this device/browser.
   const DEFAULT_API_BASE = 'https://despacho-backend-production-1f3a.up.railway.app';
 
   function authHeaders(){
