@@ -564,6 +564,7 @@
           <div class="row-main">
             <strong>#${o.id.slice(-6).toUpperCase()}</strong> · ${formatMoney(o.value)} · <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
             ${o.arrivalOverrides && o.arrivalOverrides.length ? '<span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ chegada forçada (GPS)</span>' : ''}
+            ${o.debugRawValue !== undefined ? `<span class="badge" style="background:#2a1a3a;color:#c9a5ff;">🐞 recebido cru: ${esc(String(o.debugRawValue))}</span>` : ''}
             <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
             <div class="row-sub">${o.motoboyName ? '🏍️ '+esc(o.motoboyName) : 'sem motoboy ainda'}</div>
           </div>

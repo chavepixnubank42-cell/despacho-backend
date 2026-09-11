@@ -133,7 +133,7 @@ async function geocodeAddress(address) {
   if (db.geocodeCache[key] !== undefined) return db.geocodeCache[key];
 
   try {
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(address);
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=' + encodeURIComponent(address);
     const res = await throttledFetch(url, {
       headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
     });
@@ -156,9 +156,17 @@ async function geocodeAddress(address) {
 // pin themselves — this is a starting point for the map, not cached,
 // since it's a one-off interactive lookup rather than something reused
 // every time an order is created.
+//
+// `addressdetails=1` lets us tell whether Nominatim actually matched a
+// house number or only snapped to the street itself — Brazilian OSM data
+// often lacks per-building numbers on smaller streets, in which case the
+// pin lands at roughly the middle of the street instead of the right
+// door. `hasHouseNumber` on each result lets the front-end warn the
+// person to double-check/drag the pin in that case, instead of silently
+// trusting an approximate match as if it were exact.
 async function geocodeSearch(query) {
   if (!query || !query.trim()) return [];
-  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=br&q=' + encodeURIComponent(query);
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&countrycodes=br&q=' + encodeURIComponent(query);
   const res = await throttledFetch(url, {
     headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
   });
@@ -166,7 +174,8 @@ async function geocodeSearch(query) {
   return (Array.isArray(data) ? data : []).map((r) => ({
     label: r.display_name,
     lat: parseFloat(r.lat),
-    lng: parseFloat(r.lon)
+    lng: parseFloat(r.lon),
+    hasHouseNumber: !!(r.address && r.address.house_number)
   }));
 }
 
@@ -507,15 +516,12 @@ app.get('/api/admin/reports', requireAuth('admin'), (req, res) => {
     };
   });
 
-  const totals = series.reduce(
-    (acc, s) => ({
-      delivered: acc.delivered + s.delivered,
-      canceled: acc.canceled + s.canceled,
-      revenue: acc.revenue + s.revenue,
-      paidToMotoboys: acc.paidToMotoboys + s.paidToMotoboys
-    }),
-    { delivered: 0, canceled: 0, revenue: 0, paidToMotoboys: 0 }
-  );
+  const totals = {
+    delivered: series.reduce((s, x) => s + x.delivered, 0),
+    canceled: series.reduce((s, x) => s + x.canceled, 0),
+    revenue: sumMoney(series, (x) => x.revenue),
+    paidToMotoboys: sumMoney(series, (x) => x.paidToMotoboys)
+  };
 
   res.json({ period, series, totals });
 });
@@ -1482,6 +1488,12 @@ const CREDIT_COST_PER_RIDE = 1; // every delivery costs exactly 1 credit, no mat
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
   const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip } = req.body || {};
+  // TEMP DEBUG — investigando um relato de valor de entrega chegando errado
+  // (ex: comércio digitou 8, entrega saiu com 7.98). Isto grava exatamente
+  // o que chegou no corpo da requisição, antes de qualquer parseFloat, pra
+  // conferir nos logs do servidor se a corrupção já chega daí ou acontece
+  // depois. Remover depois que o problema for identificado/confirmado.
+  console.log('[DEBUG valor recebido]', { raw: value, type: typeof value, businessId: req.authId, at: new Date().toISOString() });
   const db = loadDB();
   const business = db.businesses[businessId];
   if (!business) return res.status(404).json({ error: 'Comércio não encontrado' });
@@ -1536,6 +1548,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     pickupCoords, // {lat,lng} or null if the address couldn't be located
     deliveryCoords,
     value: rideValue, // paid to the motoboy — does not affect credit balance
+    debugRawValue: value, // TEMP DEBUG — o que chegou cru no corpo da requisição, antes do parseFloat. Remover depois.
     note: note || '',
     roundTrip: !!roundTrip, // motoboy needs to come back to the pickup point before the order counts as done
     status: 'pendente',
