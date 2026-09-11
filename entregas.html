@@ -1493,7 +1493,7 @@
       // The profile screen has its own free-text inputs (name/phone/e-mail/
       // password) that aren't behind a modal flag, so it needs the same
       // protection.
-      if(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile') return;
+      if(!canSafelyRerender()) return;
       await refreshOrders();
       await refreshProfile();
       render();
@@ -3864,10 +3864,16 @@
   document.addEventListener('click', ensureAudio);
   document.addEventListener('touchstart', ensureAudio, {passive:true});
 
+  // Mobile networks flip on/off constantly (WiFi<->dados, sinal fraco, tela
+  // trocando de app e voltando) — this shared check keeps any of those
+  // events from rebuilding the screen (and wiping whatever's being typed)
+  // while a form, modal, or the profile screen is open.
+  const canSafelyRerender = () => !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile');
+
   // Mobile browsers throttle background tabs — catch up the moment the
   // app becomes visible/foreground again instead of waiting for the next tick.
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState === 'visible' && state.profile && !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker)){
+    if(document.visibilityState === 'visible' && state.profile && canSafelyRerender()){
       refreshOrders().then(render);
     }
   });
@@ -3875,17 +3881,17 @@
   // Real "sem internet" detection — separate from "servidor fora do ar".
   window.addEventListener('offline', ()=>{
     state.isOffline = true;
-    render();
+    if(canSafelyRerender()) render();
   });
   window.addEventListener('online', async ()=>{
     state.isOffline = false;
-    render();
+    if(canSafelyRerender()) render();
     state.apiOk = await apiSelfTest();
     if(state.apiOk){
       showToast('🌐 Conexão restabelecida');
       if(state.profile) await refreshOrders();
     }
-    render();
+    if(canSafelyRerender()) render();
   });
 
   // While the server looks unreachable, keep quietly retrying in the
@@ -3897,7 +3903,7 @@
     if(wasDown && state.apiOk){
       showToast('✅ Conexão com o servidor restabelecida');
       if(state.profile) await refreshOrders();
-      render();
+      if(canSafelyRerender()) render();
     }
   }, 15000);
 
