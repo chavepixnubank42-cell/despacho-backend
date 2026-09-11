@@ -1680,7 +1680,7 @@
       : ((state.profile && state.profile.preciseCoords) || null);
     let typedAddress = '';
     if(mode === 'order-delivery'){
-      const form = $('#form-new-order');
+      const form = document.getElementById('form-new-order');
       if(form){
         const fd = new FormData(form);
         const roundTripBox = form.querySelector('#new-order-round-trip');
@@ -1708,6 +1708,12 @@
           const c = [results[0].lat, results[0].lng];
           locationPickerMap.setView(c, 17);
           locationPickerMarker.setLatLng(c);
+          if(!results[0].hasHouseNumber){
+            // O mapa aberto do OpenStreetMap não tem o número exato dessa
+            // rua cadastrado — o pino caiu perto, mas não necessariamente na
+            // porta certa. Avisa pra pessoa conferir/arrastar antes de salvar.
+            showToast('⚠️ Não achamos o número exato desse endereço — confira e ajuste o pino no mapa');
+          }
         }
       }).catch(()=>{ /* geocodificação falhou — a pessoa ajusta manualmente */ });
       return;
@@ -1806,7 +1812,7 @@
       const results = (data && data.results) || [];
       if(!resultsEl) return;
       if(!results.length){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
-      resultsEl.innerHTML = results.map((r,i) => `<div class="location-search-item" data-idx="${i}" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);">${esc(r.label)}</div>`).join('');
+      resultsEl.innerHTML = results.map((r,i) => `<div class="location-search-item" data-idx="${i}" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);">${r.hasHouseNumber ? '' : '⚠️ '}${esc(r.label)}${r.hasHouseNumber ? '' : ' <span style="color:var(--orange,#FF6A3D);font-size:11px;">(sem número exato — confira o pino)</span>'}</div>`).join('');
       resultsEl.style.display = 'block';
       resultsEl.querySelectorAll('.location-search-item').forEach(el=>{
         el.onclick = ()=>{
