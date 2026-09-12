@@ -853,6 +853,17 @@ app.get('/api/geocode-search', requireAuth('business'), async (req, res) => {
   }
 });
 
+// This business's own delivery addresses used before, most recent first —
+// each already has a confirmed pin from a past order, so picking one skips
+// geocoding entirely (see saveRecentAddress, called from order creation).
+app.get('/api/businesses/:id/recent-addresses', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  res.json(b.recentAddresses || []);
+});
+
 // Lets a business overwrite the geocoded guess with the real GPS position
 // of their shop — captured with the phone physically there. Nominatim
 // (free, address-text-based geocoding) can be off by hundreds of meters,
@@ -1485,6 +1496,42 @@ function isOfferedTo(o, motoboyId) {
 
 const CREDIT_COST_PER_RIDE = 1; // every delivery costs exactly 1 credit, no matter what the motoboy is paid
 
+// ---------------------------------------------------------------
+// Recent delivery addresses — every business keeps a short list of
+// addresses they've actually delivered to before, each with its already-
+// confirmed pin (whatever coordinates were used for that order — geocoded
+// or manually adjusted on the map). Picking one of these next time skips
+// geocoding entirely and reuses the known-good pin, exactly like a "usados
+// recentemente" list in a real maps app — and it's more reliable than a
+// fresh geocode for a repeat customer, since it's whatever this business
+// already confirmed works.
+// ---------------------------------------------------------------
+const RECENT_ADDRESS_CAP = 40;
+function saveRecentAddress(business, address, coords) {
+  if (!address || !address.trim() || !coords) return;
+  const norm = address.trim().toLowerCase();
+  if (!Array.isArray(business.recentAddresses)) business.recentAddresses = [];
+  const idx = business.recentAddresses.findIndex((a) => a.address.trim().toLowerCase() === norm);
+  if (idx !== -1) {
+    const existing = business.recentAddresses[idx];
+    existing.lat = coords.lat;
+    existing.lng = coords.lng;
+    existing.lastUsedAt = Date.now();
+    existing.useCount = (existing.useCount || 1) + 1;
+    business.recentAddresses.splice(idx, 1);
+    business.recentAddresses.unshift(existing);
+  } else {
+    business.recentAddresses.unshift({
+      address: address.trim(),
+      lat: coords.lat,
+      lng: coords.lng,
+      lastUsedAt: Date.now(),
+      useCount: 1
+    });
+  }
+  if (business.recentAddresses.length > RECENT_ADDRESS_CAP) business.recentAddresses.length = RECENT_ADDRESS_CAP;
+}
+
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
   const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip } = req.body || {};
@@ -1584,6 +1631,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     freshBusiness.credits -= CREDIT_COST_PER_RIDE;
     addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
   }
+  saveRecentAddress(freshBusiness, deliveryAddress, deliveryCoords);
   freshDb.orders[order.id] = order;
   saveDB(freshDb);
   notifyOfferedMotoboy(freshDb, order);

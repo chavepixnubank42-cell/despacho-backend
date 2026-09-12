@@ -1328,6 +1328,7 @@
     incomingAlert: null, // order object for the big banner shown to an online motoboy
     cancelModal: null, // {orderId, reason, note} while the cancel-reason sheet is open
     supportModal: null, // {orderId, reason, note} while the support sheet is open
+    recentAddresses: [], // business only — past delivery addresses with already-confirmed pins
     rateModal: null, // {orderId, stars, comment} while the rating sheet is open
     myRatingSummary: null, // {average, count} for whoever is logged in
     historyDateFilter: 'todas', // hoje | 7dias | 30dias | todas
@@ -1379,6 +1380,7 @@
         resetNoticeTracking();
         await refreshOrders();
         await refreshMyRatingSummary();
+        await refreshRecentAddresses();
         startPolling();
         render();
         return;
@@ -1513,6 +1515,14 @@
   }
 
   // ---------- auth actions ----------
+  // Business-only: the list of past delivery addresses (each with its
+  // already-confirmed pin) used for live suggestions on the new-order form.
+  async function refreshRecentAddresses(){
+    if(state.role !== 'business' || !state.myId) return;
+    const list = await apiGet('/api/businesses/'+state.myId+'/recent-addresses');
+    state.recentAddresses = Array.isArray(list) ? list : [];
+  }
+
   async function afterAuthSuccess(role, token, profile){
     state.authToken = token;
     await setJSON('auth-token', token, false);
@@ -1525,6 +1535,7 @@
     resetNoticeTracking();
     await refreshOrders();
     await refreshMyRatingSummary();
+    await refreshRecentAddresses();
     startPolling();
     render();
   }
@@ -1809,10 +1820,82 @@
     return backdrop;
   }
 
-  // Busca endereço (com debounce) e mostra as opções em baixo do campo —
-  // clicar numa opção só centraliza o mapa e move o pino ali; o ajuste
-  // fino continua sendo arrastar o pino, já que a busca de endereço tem
-  // o mesmo limite de precisão discutido acima.
+  // ---------- sugestão de endereço no campo principal (igual Maps) ----------
+  // Duas fontes combinadas: os endereços que este comércio já usou antes
+  // (instantâneo, filtrado localmente, já vem com o pino confirmado — sem
+  // precisar geocodificar de novo) aparecem primeiro; embaixo, resultados
+  // ao vivo do mesmo buscador do mapa, pra endereços novos. Escolher
+  // qualquer um dos dois já preenche o campo E marca o pino de uma vez,
+  // sem precisar abrir o mapa manualmente — abrir o mapa continua
+  // disponível só pra ajuste fino.
+  let deliveryAddressSearchTimer = null;
+  function onDeliveryAddressInput(e){
+    const q = e.target.value;
+    clearTimeout(deliveryAddressSearchTimer);
+    const resultsEl = document.getElementById('delivery-address-suggestions');
+    if(!resultsEl) return;
+    const qNorm = (q||'').trim().toLowerCase();
+    if(!qNorm || qNorm.length < 2){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
+
+    const recentMatches = (state.recentAddresses||[])
+      .filter(a => a.address.toLowerCase().includes(qNorm))
+      .slice(0, 5)
+      .map(a => ({ label: a.address, lat: a.lat, lng: a.lng, hasHouseNumber: true, fromRecent: true }));
+
+    renderDeliverySuggestions(recentMatches); // shows recent matches immediately, no network wait
+
+    if(qNorm.length < 5) return; // too short to bother hitting the geocoder yet
+    deliveryAddressSearchTimer = setTimeout(async ()=>{
+      const data = await apiGet('/api/geocode-search?q=' + encodeURIComponent(q));
+      const liveResults = (data && data.results) || [];
+      // Skip anything that's basically the same text as a recent match already shown.
+      const recentLabels = new Set(recentMatches.map(r => r.label.toLowerCase()));
+      const fresh = liveResults
+        .filter(r => !recentLabels.has(r.label.toLowerCase()))
+        .map(r => ({ label: r.label, lat: r.lat, lng: r.lng, hasHouseNumber: r.hasHouseNumber, fromRecent: false }));
+      renderDeliverySuggestions([...recentMatches, ...fresh]);
+    }, 400);
+  }
+
+  function renderDeliverySuggestions(items){
+    const resultsEl = document.getElementById('delivery-address-suggestions');
+    if(!resultsEl) return;
+    if(!items.length){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
+    resultsEl.innerHTML = items.map((r,i) => `
+      <div class="location-search-item" data-idx="${i}" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);">
+        ${r.fromRecent ? '🕐 ' : (r.hasHouseNumber ? '' : '⚠️ ')}${esc(r.label)}
+        ${r.fromRecent ? ' <span style="color:var(--accent,#C6FF3D);font-size:11px;">(usado antes)</span>' : (r.hasHouseNumber ? '' : ' <span style="color:var(--orange,#FF6A3D);font-size:11px;">(sem número exato)</span>')}
+      </div>
+    `).join('');
+    resultsEl.style.display = 'block';
+    resultsEl.querySelectorAll('.location-search-item').forEach(el=>{
+      el.onclick = ()=>{
+        const r = items[parseInt(el.getAttribute('data-idx'),10)];
+        const addressInput = document.getElementById('new-order-delivery-address');
+        const hintEl = document.getElementById('new-order-delivery-precision');
+        if(addressInput) addressInput.value = r.label;
+        state.newOrderDeliveryCoords = {lat: r.lat, lng: r.lng};
+        if(hintEl){
+          const note = r.fromRecent
+            ? '📍 Endereço já usado antes — localização salva, sem precisar ajustar'
+            : (r.hasHouseNumber === false
+                ? '⚠️ Endereço aproximado (sem número exato) — confira o pino'
+                : '✅ Localização identificada automaticamente');
+          hintEl.innerHTML = note + ' — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>';
+          const btn = hintEl.querySelector('#btn-mark-delivery-location');
+          if(btn) btn.onclick = ()=>openLocationPicker('order-delivery');
+        }
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+      };
+    });
+  }
+
+
+  // Busca endereço (com debounce) e mostra as opções em baixo do campo do
+  // mapa — clicar numa opção só centraliza o mapa e move o pino ali; o
+  // ajuste fino continua sendo arrastar o pino, já que a busca de endereço
+  // tem o mesmo limite de precisão discutido acima.
   let locationSearchTimer = null;
   function onLocationSearchInput(e){
     const q = e.target.value;
@@ -3227,11 +3310,14 @@
           </div>
           <div class="field">
             <label>Endereço de entrega</label>
-            <textarea name="deliveryAddress" placeholder="Rua, número, bairro, cidade">${esc(vDelivery)}</textarea>
+            <div style="position:relative;">
+              <textarea name="deliveryAddress" id="new-order-delivery-address" placeholder="Rua, número, bairro, cidade" autocomplete="off">${esc(vDelivery)}</textarea>
+              <div id="delivery-address-suggestions" style="position:absolute;top:100%;left:0;right:0;z-index:1000;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;margin-top:4px;overflow:hidden;display:none;max-height:260px;overflow-y:auto;"></div>
+            </div>
             <div class="field-hint" id="new-order-delivery-precision">
               ${state.newOrderDeliveryCoords
                 ? '✅ Localização exata marcada nesse mapa — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>'
-                : '💡 Endereço digitado pode ficar impreciso no mapa — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar local exato no mapa</button> (recomendado)'}
+                : '💡 Comece a digitar — vai aparecer sugestão, inclusive de endereços já usados antes. Ou <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar local exato no mapa</button> na mão.'}
             </div>
           </div>
           <div class="field">
@@ -3556,6 +3642,8 @@
     if(btnMarkLocation) btnMarkLocation.onclick = ()=>openLocationPicker('business');
     const btnMarkDeliveryLocation = $('#btn-mark-delivery-location');
     if(btnMarkDeliveryLocation) btnMarkDeliveryLocation.onclick = ()=>openLocationPicker('order-delivery');
+    const deliveryAddressInput = $('#new-order-delivery-address');
+    if(deliveryAddressInput) deliveryAddressInput.oninput = onDeliveryAddressInput;
     const btnOpenStatement = $('#btn-open-statement');
     if(btnOpenStatement) btnOpenStatement.onclick = openStatement;
 
