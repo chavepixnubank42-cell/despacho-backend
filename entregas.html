@@ -233,6 +233,28 @@
     border-radius:8px;
   }
   .gps-lock.is-close{border-color:var(--lime);}
+  /* Pino fixo no centro do mapa (estilo Uber/iFood): quem arrasta é o
+     mapa por baixo, o pino nunca se move na tela — sempre aponta pro
+     exato centro do quadro do mapa. */
+  .map-pin-wrap{ position:relative; }
+  .map-pin-fixed{
+    position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-100%);
+    font-size:36px; line-height:1; pointer-events:none; z-index:500;
+    filter:drop-shadow(0 3px 4px rgba(0,0,0,0.4));
+  }
+  .map-pin-shadow{
+    position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-3px);
+    width:10px; height:5px; border-radius:50%;
+    background:rgba(0,0,0,0.35); z-index:499; pointer-events:none;
+  }
+  .map-address-label{
+    margin-top:10px; padding:10px 12px; border-radius:10px;
+    background:var(--surface); border:1px solid var(--border);
+    font-size:13px; line-height:1.4; min-height:20px;
+  }
+  .map-address-label.is-warning{ border-color:var(--orange,#FF6A3D); color:var(--orange,#FF6A3D); }
   .gps-distance{
     font-family:var(--font-mono);
     font-size:12px;
@@ -1689,7 +1711,7 @@
   // corrige o erro do sensor na hora, o que nenhuma leitura sozinha faz.
   // Aqui usamos o GPS só como ponto de partida do mapa; quem decide onde
   // fica o pino de verdade é o comerciante, olhando o mapa.
-  let locationPickerMap = null, locationPickerMarker = null;
+  let locationPickerMap = null;
 
   // mode: 'business' (marca a localização fixa da loja, salva no perfil) ou
   // 'order-delivery' (marca só a coordenada de entrega desta corrida, usada
@@ -1727,10 +1749,9 @@
       // cliente, não de quem está com o celular na mão.
       apiGet('/api/geocode-search?q='+encodeURIComponent(typedAddress)).then(data=>{
         const results = (data && data.results) || [];
-        if(results[0] && locationPickerMap && locationPickerMarker && !state.newOrderDeliveryCoords){
-          const c = [results[0].lat, results[0].lng];
-          locationPickerMap.setView(c, 17);
-          locationPickerMarker.setLatLng(c);
+        if(results[0] && locationPickerMap && !state.newOrderDeliveryCoords){
+          locationPickerMap.setView([results[0].lat, results[0].lng], 17);
+          updateLocationLabelFromMapCenter();
           if(!results[0].hasHouseNumber){
             // O mapa aberto do OpenStreetMap não tem o número exato dessa
             // rua cadastrado — o pino caiu perto, mas não necessariamente na
@@ -1749,9 +1770,8 @@
       navigator.geolocation.getCurrentPosition(
         (pos)=>{
           if(locationPickerMap){
-            const c = [pos.coords.latitude, pos.coords.longitude];
-            locationPickerMap.setView(c, 17);
-            locationPickerMarker.setLatLng(c);
+            locationPickerMap.setView([pos.coords.latitude, pos.coords.longitude], 17);
+            updateLocationLabelFromMapCenter();
           }
         },
         ()=>{ /* sem GPS disponível — a pessoa arrasta o mapa manualmente até achar o lugar */ },
@@ -1763,24 +1783,51 @@
   function closeLocationPicker(){
     state.showLocationPicker = false;
     locationPickerMap = null;
-    locationPickerMarker = null;
     render();
   }
 
+  // Estilo Uber/iFood: o pino é um elemento de HTML fixo no centro da tela
+  // (não uma marca do Leaflet), e quem se move é o MAPA por baixo dele —
+  // então "onde está o pino" é sempre simplesmente o centro do mapa
+  // (map.getCenter()), sem precisar rastrear a posição de um marcador à parte.
+  let reverseGeocodeTimer = null;
   function initLocationPickerMap(){
     if(typeof L === 'undefined') return; // Leaflet ainda não carregou (sem internet?)
     const start = state.locationPickerCoords || {lat:-14.235, lng:-51.9253}; // centro do Brasil, se nada melhor
     const zoom = state.locationPickerCoords ? 17 : 4;
     locationPickerMap = L.map('location-picker-map', {attributionControl:false}).setView([start.lat, start.lng], zoom);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(locationPickerMap);
-    locationPickerMarker = L.marker([start.lat, start.lng], {draggable:true}).addTo(locationPickerMap);
-    locationPickerMap.on('click', (e)=>{ locationPickerMarker.setLatLng(e.latlng); });
+    locationPickerMap.on('movestart', ()=>{
+      const labelEl = document.getElementById('map-address-label');
+      if(labelEl){ labelEl.textContent = '🔄 Movendo…'; labelEl.className = 'map-address-label'; }
+    });
+    locationPickerMap.on('moveend', updateLocationLabelFromMapCenter);
     setTimeout(()=>{ if(locationPickerMap) locationPickerMap.invalidateSize(); }, 50);
+    updateLocationLabelFromMapCenter(); // mostra o endereço do ponto inicial, sem esperar a pessoa arrastar
+  }
+
+  function updateLocationLabelFromMapCenter(){
+    if(!locationPickerMap) return;
+    clearTimeout(reverseGeocodeTimer);
+    reverseGeocodeTimer = setTimeout(async ()=>{
+      const c = locationPickerMap.getCenter();
+      const labelEl = document.getElementById('map-address-label');
+      if(!labelEl) return;
+      const data = await apiGet('/api/geocode-reverse?lat='+c.lat+'&lng='+c.lng);
+      if(!locationPickerMap) return; // o picker pode ter sido fechado enquanto a busca corria
+      if(!data || !data.label){
+        labelEl.textContent = '📍 Endereço não identificado aqui — confira no mapa se é o lugar certo mesmo assim.';
+        labelEl.className = 'map-address-label is-warning';
+      } else {
+        labelEl.textContent = '📍 ' + data.label;
+        labelEl.className = 'map-address-label' + (data.hasHouseNumber ? '' : ' is-warning');
+      }
+    }, 500);
   }
 
   async function saveLocationPicker(){
-    if(!locationPickerMarker) return;
-    const {lat, lng} = locationPickerMarker.getLatLng();
+    if(!locationPickerMap) return;
+    const {lat, lng} = locationPickerMap.getCenter();
     if(state.locationPickerMode === 'order-delivery'){
       state.newOrderDeliveryCoords = {lat, lng};
       closeLocationPicker();
@@ -1804,16 +1851,21 @@
           <span class="modal-title">📍 Marcar localização exata</span>
           <button class="modal-close" id="location-picker-close">✕</button>
         </div>
-        <p class="page-sub" style="margin-bottom:12px;">Arraste o pino (ou toque no mapa) até a porta da sua loja. Isso é mais confiável que o GPS sozinho — o motoboy vai medir a distância de chegada a partir daqui.</p>
+        <p class="page-sub" style="margin-bottom:12px;">Arraste o <strong>mapa</strong> até a porta certa ficar embaixo do pino (igual Uber/iFood) — ou busque o endereço abaixo.</p>
         <div style="position:relative;margin-bottom:10px;">
           <input type="text" id="location-picker-search" placeholder="Buscar endereço ou ponto de referência..." autocomplete="off"
                  style="width:100%;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--border);color:var(--text);font-size:14px;">
           <div id="location-picker-results" style="position:absolute;top:100%;left:0;right:0;z-index:1000;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;margin-top:4px;overflow:hidden;display:none;"></div>
         </div>
-        <div id="location-picker-map" style="width:100%;height:320px;border-radius:12px;overflow:hidden;border:1px solid var(--border);"></div>
+        <div class="map-pin-wrap">
+          <div id="location-picker-map" style="width:100%;height:320px;border-radius:12px;overflow:hidden;border:1px solid var(--border);"></div>
+          <div class="map-pin-shadow"></div>
+          <div class="map-pin-fixed">📍</div>
+        </div>
+        <div class="map-address-label" id="map-address-label">🔄 Carregando…</div>
         <div style="display:flex;gap:10px;margin-top:14px;">
           <button type="button" class="btn-secondary" id="location-picker-cancel" style="flex:1;">Cancelar</button>
-          <button type="button" class="btn-primary" id="location-picker-save" style="flex:1;">Salvar localização</button>
+          <button type="button" class="btn-primary" id="location-picker-save" style="flex:1;">Confirmar este local</button>
         </div>
       </div>
     `;
@@ -1912,9 +1964,8 @@
       resultsEl.querySelectorAll('.location-search-item').forEach(el=>{
         el.onclick = ()=>{
           const r = results[parseInt(el.getAttribute('data-idx'),10)];
-          if(locationPickerMap && locationPickerMarker){
-            locationPickerMap.setView([r.lat, r.lng], 17);
-            locationPickerMarker.setLatLng([r.lat, r.lng]);
+          if(locationPickerMap){
+            locationPickerMap.setView([r.lat, r.lng], 17); // dispara 'moveend' sozinho, que já atualiza a etiqueta de endereço
           }
           resultsEl.style.display = 'none';
           resultsEl.innerHTML = '';

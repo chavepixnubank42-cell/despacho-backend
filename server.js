@@ -179,6 +179,23 @@ async function geocodeSearch(query) {
   }));
 }
 
+// Coordinate -> address, for the "drag the map, pin stays fixed in the
+// center" picker (same interaction Uber/iFood use): as the person pans the
+// map, the front-end asks "what's under the pin now?" so it can show the
+// street name live, instead of leaving them staring at a blank map.
+async function reverseGeocode(lat, lng) {
+  const url = 'https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&lat=' + lat + '&lon=' + lng;
+  const res = await throttledFetch(url, {
+    headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
+  });
+  const data = await res.json();
+  if (!data || data.error) return { label: null, hasHouseNumber: false };
+  return {
+    label: data.display_name || null,
+    hasHouseNumber: !!(data.address && data.address.house_number)
+  };
+}
+
 function distanceMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -850,6 +867,20 @@ app.get('/api/geocode-search', requireAuth('business'), async (req, res) => {
   } catch (e) {
     console.error('Busca de endereço falhou para', q, e.message);
     res.json({ results: [] });
+  }
+});
+
+// Coordinate -> address, used live while dragging the map pin picker.
+app.get('/api/geocode-reverse', requireAuth('business'), async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return res.status(400).json({ error: 'Coordenadas inválidas' });
+  try {
+    const result = await reverseGeocode(lat, lng);
+    res.json(result);
+  } catch (e) {
+    console.error('Geocodificação reversa falhou para', lat, lng, e.message);
+    res.json({ label: null, hasHouseNumber: false });
   }
 });
 
