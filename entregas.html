@@ -201,6 +201,20 @@
     cursor:pointer;
   }
   .btn-copy-addr:active{ opacity:0.6; }
+  .btn-nav-app{
+    flex-shrink:0;
+    font-family:var(--font-mono);
+    font-size:11px;
+    font-weight:700;
+    color:#fff;
+    border:none;
+    border-radius:6px;
+    padding:6px 10px;
+    cursor:pointer;
+    text-decoration:none;
+    display:inline-block;
+  }
+  .btn-nav-app:active{ opacity:0.7; }
   .active-ride.is-warning{ border-color:#FF3D3D; animation:alert-pulse-red 1s ease-in-out infinite; }
   .active-ride.is-warning .countdown-value{ color:#FF3D3D; }
   .active-ride.is-late{ border-color:#FF3D3D; background:rgba(255,61,61,0.08); }
@@ -3113,10 +3127,14 @@
     const mapsUrl = coords
       ? 'https://www.google.com/maps/dir/?api=1&destination=' + coords.lat + ',' + coords.lng + '&travelmode=driving'
       : 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(address) + '&travelmode=driving';
-    return `<div class="active-ride-addr" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+    const wazeUrl = coords
+      ? 'https://waze.com/ul?ll=' + coords.lat + ',' + coords.lng + '&navigate=yes'
+      : 'https://waze.com/ul?q=' + encodeURIComponent(address) + '&navigate=yes';
+    return `<div class="active-ride-addr" style="display:flex;flex-direction:column;gap:8px;">
       <span>📍 ${esc(address)}</span>
-      <div style="display:flex;gap:6px;flex-shrink:0;">
-        <a href="${mapsUrl}" target="_blank" rel="noopener" class="btn-copy-addr" style="text-decoration:none;">🧭 Navegar</a>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <a href="${mapsUrl}" target="_blank" rel="noopener" class="btn-nav-app" style="background:#1a73e8;">🗺️ Google Maps</a>
+        <a href="${wazeUrl}" target="_blank" rel="noopener" class="btn-nav-app" style="background:#33ccff;color:#04243d;">🧭 Waze</a>
         <button type="button" class="btn-copy-addr" data-copy-address="${attr}" title="Copiar endereço">📋 Copiar</button>
       </div>
     </div>`;
