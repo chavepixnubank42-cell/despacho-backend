@@ -384,12 +384,13 @@ app.get('/api/admin/support-tickets', requireAuth('admin'), (req, res) => {
   res.json(list.slice(0, 300));
 });
 
-// "Encerrar corrida" — o admin força o fim da corrida quando ela não tem
-// mais conserto (ex: motoboy relatou um problema sério). Funciona a partir
-// de qualquer status não-terminal, diferente do /cancel normal que só
-// aceita até 'no_local_retirada' — aqui é justamente pra destravar os
-// casos que o cancelamento comum não cobre. Estorna o crédito do comércio
-// se ele tinha sido cobrado, igual o cancelamento normal.
+// "Encerrar corrida" — o admin fecha a corrida quando o problema já foi
+// resolvido (por telefone, por exemplo) e não faz sentido segurar ela em
+// aberto. Isso marca como CONCLUÍDA (igual o motoboy tivesse confirmado a
+// entrega normalmente) — não como cancelada, pra não pesar contra o
+// motoboy nem no histórico dele nem nos ganhos. Funciona a partir de
+// qualquer status não-terminal, diferente do /cancel normal que só aceita
+// até 'no_local_retirada'.
 app.post('/api/admin/orders/:id/end', requireAuth('admin'), (req, res) => {
   const db = loadDB();
   const o = db.orders[req.params.id];
@@ -397,18 +398,10 @@ app.post('/api/admin/orders/:id/end', requireAuth('admin'), (req, res) => {
   if (o.status === 'entregue' || o.status === 'cancelado') {
     return res.status(409).json({ error: 'Essa corrida já está finalizada.' });
   }
-  if (o.creditsCharged) {
-    const business = db.businesses[o.businessId];
-    if (business) {
-      business.credits = (business.credits || 0) + CREDIT_COST_PER_RIDE;
-      addTransaction(db, o.businessId, 'credito', CREDIT_COST_PER_RIDE, 'Estorno — Entrega #' + o.id.slice(-6).toUpperCase() + ' encerrada pelo suporte', o.id);
-    }
-    o.creditsCharged = false;
-  }
-  o.status = 'cancelado';
-  o.cancelledAt = Date.now();
-  o.cancelledBy = 'admin';
-  o.cancelReason = (req.body && req.body.note) || 'Encerrada pelo suporte';
+  o.status = 'entregue';
+  o.deliveredAt = Date.now();
+  o.closedBy = 'admin'; // distingue de uma entrega confirmada pelo próprio motoboy, sem mudar como ela aparece pra ele
+  o.closeReason = (req.body && req.body.note) || 'Encerrada pelo suporte';
   if (o.support && o.support.status === 'aberto') {
     o.support.status = 'resolvido';
     o.support.resolvedAt = Date.now();
@@ -418,7 +411,7 @@ app.post('/api/admin/orders/:id/end', requireAuth('admin'), (req, res) => {
   if (o.motoboyId) {
     pushNotice(db, 'motoboys', o.motoboyId, {
       title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' encerrada pelo suporte',
-      body: 'Nosso suporte encerrou essa corrida. Pode deixar o pedido de lado — se tiver dúvida, chame a gente.',
+      body: 'Nosso suporte encerrou essa corrida como concluída. Pode deixar o pedido de lado — se tiver dúvida, chame a gente.',
       promo: false
     });
   }

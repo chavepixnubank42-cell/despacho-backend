@@ -3105,11 +3105,20 @@
   // Renders an address line with a "copiar" button next to it, so the
   // motoboy can paste it straight into whatever GPS app they actually use
   // (Waze, Google Maps, etc) instead of retyping it by hand.
-  function renderAddressLine(address){
+  function renderAddressLine(address, coords){
     const attr = esc(address).replace(/"/g, '&quot;');
-    return `<div class="active-ride-addr" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+    // Prefer the actual pin coordinates over the text address — that's the
+    // whole point of having a confirmed pin (address text alone is what
+    // caused the "cai no lugar errado" problem in the first place).
+    const mapsUrl = coords
+      ? 'https://www.google.com/maps/dir/?api=1&destination=' + coords.lat + ',' + coords.lng + '&travelmode=driving'
+      : 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(address) + '&travelmode=driving';
+    return `<div class="active-ride-addr" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
       <span>📍 ${esc(address)}</span>
-      <button type="button" class="btn-copy-addr" data-copy-address="${attr}" title="Copiar endereço">📋 Copiar</button>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        <a href="${mapsUrl}" target="_blank" rel="noopener" class="btn-copy-addr" style="text-decoration:none;">🧭 Navegar</a>
+        <button type="button" class="btn-copy-addr" data-copy-address="${attr}" title="Copiar endereço">📋 Copiar</button>
+      </div>
     </div>`;
   }
 
@@ -3131,7 +3140,7 @@
             <span class="countdown-value" id="countdown-timer" data-start-at="${o.acceptedAt}">16:00</span>
           </div>
           <div class="active-ride-sub">até a retirada</div>
-          ${renderAddressLine(o.pickupAddress)}
+          ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
           ${renderGpsLock(o, 'pickupCoords', 'pickup', 'data-arrive-pickup', '📍 Cheguei na retirada')}
           ${giveUpLink}
           ${supportLink}
@@ -3145,7 +3154,7 @@
           <div class="active-ride-head">
             <span class="active-ride-label">📦 Na retirada</span>
           </div>
-          ${renderAddressLine(o.pickupAddress)}
+          ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
           <div class="active-ride-hint">Colete o pedido e toque em sair quando estiver pronto.</div>
           <button class="btn-stage" data-depart="${o.id}">🚀 Saí para a entrega</button>
           ${cancelLink}
@@ -3161,7 +3170,7 @@
             <span class="countdown-value" id="countdown-timer" data-start-at="${o.departedAt}">16:00</span>
           </div>
           <div class="active-ride-sub">até a entrega</div>
-          ${renderAddressLine(o.deliveryAddress)}
+          ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
           ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei na entrega')}
           ${supportLink}
         </div>
@@ -3175,7 +3184,7 @@
             <div class="active-ride-head">
               <span class="active-ride-label">🏁 No destino</span>
             </div>
-            ${renderAddressLine(o.deliveryAddress)}
+            ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
             <div class="active-ride-hint">🔁 Essa corrida é ida e volta. Entregue/pegue o que for necessário e toque em voltar quando estiver pronto.</div>
             <button class="btn-stage" style="width:100%;margin-top:10px;" data-depart-return="${o.id}">🔁 Voltar para a retirada</button>
             ${supportLink}
@@ -3187,7 +3196,7 @@
           <div class="active-ride-head">
             <span class="active-ride-label">🏁 No destino</span>
           </div>
-          ${renderAddressLine(o.deliveryAddress)}
+          ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
           <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
           <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
           ${supportLink}
@@ -3200,7 +3209,7 @@
           <div class="active-ride-head">
             <span class="active-ride-label">🔁 Voltando para a retirada</span>
           </div>
-          ${renderAddressLine(o.pickupAddress)}
+          ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
           ${renderGpsLock(o, 'pickupCoords', 'return', 'data-arrive-return', '📍 Cheguei de volta')}
           ${supportLink}
         </div>
@@ -3213,7 +3222,7 @@
         <div class="active-ride-head">
           <span class="active-ride-label">🔁 De volta na retirada</span>
         </div>
-        ${renderAddressLine(o.pickupAddress)}
+        ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
         <div class="active-ride-hint">Chegou de volta — confirme para concluir a corrida.</div>
         <button class="btn-deliver" style="width:100%;margin-top:10px;" data-complete-return="${o.id}">✅ Concluir corrida</button>
         ${supportLink}
