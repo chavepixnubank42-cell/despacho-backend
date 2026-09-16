@@ -1,4 +1,4 @@
-# ChegouJá — Backend
+# Despacho — Backend
 
 API que substitui o `window.storage` do protótipo, pra funcionar fora do Claude,
 em qualquer celular, a qualquer hora.
@@ -25,7 +25,7 @@ npm start
 ```
 
 Isso sobe a API em `http://localhost:3000`. Abrindo esse endereço no navegador
-deve aparecer "ChegouJá API rodando ✅".
+deve aparecer "Despacho API rodando ✅".
 
 ## Rotas disponíveis
 
@@ -52,15 +52,6 @@ responder antes de passar pro próximo) já está implementada dentro do
 `server.js`, incluindo um relógio de fundo que passa a corrida adiante mesmo
 que ninguém esteja com o app aberto naquele momento.
 
-**Fila por proximidade:** enquanto estiver on-line, o app do motoboy manda
-sua localização pro servidor a cada ~25 segundos (`PATCH /api/motoboys/:id`
-com `{lat, lng}`). Quando uma corrida nova é criada, o endereço de retirada
-já é convertido em coordenadas (geocodificação) — com isso, a fila passa a
-oferecer a corrida primeiro pro motoboy mais PERTO da retirada, e só usa
-"quem fez menos corridas" como critério de desempate ou para motoboys sem
-localização recente (ex: GPS recusado, ou ficou mais de 10 minutos sem
-atualizar).
-
 ## Colocando no ar de verdade (deploy)
 
 Qualquer um destes serviços tem plano gratuito e funciona bem pra começar:
@@ -74,7 +65,7 @@ Passo geral (vale pros três):
 1. Sobe essa pasta pra um repositório no GitHub.
 2. Cria uma conta no serviço escolhido e conecta esse repositório.
 3. Ele vai rodar `npm install` e `npm start` sozinho.
-4. Você recebe uma URL pública, tipo `https://chegoja-api.up.railway.app`.
+4. Você recebe uma URL pública, tipo `https://despacho-api.up.railway.app`.
 
 ⚠️ **Atenção ao `data.json`:** em alguns serviços gratuitos, o sistema de
 arquivos é apagado a cada novo deploy/reinício. Pra não perder os dados,
@@ -99,41 +90,6 @@ Pra ativar a recarga de créditos do comércio via Pix, você precisa:
 
 Sem essa variável configurada, o app continua funcionando normalmente — só a recarga de créditos fica temporariamente desabilitada, com um aviso claro pro usuário.
 
-## Painel administrativo
-
-Existe uma terceira "conta" — a do dono da operação — completamente
-separada do app de comércio/motoboy. É uma página própria (`admin.html`),
-publicada no mesmo servidor, em `/admin` (ex:
-`https://SUA-API.up.railway.app/admin`). Não tem nenhum link dentro do
-`entregas.html` levando até ela — quem administra só precisa saber/
-guardar esse endereço.
-
-O acesso não tem cadastro: é só uma senha, configurada como variável de
-ambiente no Railway:
-
-```
-ADMIN_PASSWORD=escolha_uma_senha_forte_aqui
-```
-
-Depois de configurar essa variável, abra `/admin` e entre com essa senha.
-Lá dá pra ver:
-
-- Resumo geral (comércios, motoboys on-line, corridas em andamento,
-  entregas concluídas, canceladas, receita da plataforma, quanto já foi
-  pago aos motoboys, saldo total em créditos dos comércios).
-- Lista de todos os comércios e motoboys, com botão de **bloquear/
-  desbloquear** — uma conta bloqueada não consegue mais fazer login nem
-  criar/receber novas corridas (corridas já em andamento continuam até o
-  fim normalmente).
-- Motoboys novos entram com **aprovação pendente** — não conseguem ficar
-  on-line até você aprovar pelo painel (os que já existiam antes dessa
-  função continuam funcionando normalmente).
-- Lista das últimas corridas de todo mundo, com status e quem está
-  atendendo cada uma.
-
-Guarde essa senha em local seguro — quem tiver ela tem acesso total ao
-painel administrativo.
-
 ### Testando sem gastar dinheiro de verdade
 
 O Mercado Pago tem um modo de teste completo: com o Access Token de teste,
@@ -141,6 +97,53 @@ os Pix gerados não movimentam dinheiro real, e você pode simular a
 aprovação do pagamento pelo próprio painel deles. Veja a documentação de
 ["Realizar testes"](https://www.mercadopago.com.br/developers/pt/docs/checkout-api/additional-content/your-integrations/test/cards)
 no site do Mercado Pago antes de trocar pro Access Token de produção.
+
+## Chat de suporte (motoboy ↔ suporte)
+
+O motoboy consegue falar com o suporte pelo próprio app, a partir da tela da
+corrida ativa (em todas as etapas, com um botão em destaque na etapa de dar
+baixa). As mensagens ficam salvas no servidor, em `data.json`.
+
+Rotas do lado do motoboy (usam o login normal dele):
+
+| Rota | O que faz |
+|---|---|
+| `GET /api/support/messages` | Lista a conversa dele e marca as respostas como lidas |
+| `GET /api/support/unread` | Quantas respostas não lidas (para o aviso no botão) |
+| `POST /api/support/messages` | Envia mensagem `{text, orderId?}` |
+
+### Como o suporte responde
+
+Existe uma tela de atendimento pronta, servida pelo próprio servidor:
+
+```
+https://SEU-SERVIDOR/suporte
+```
+
+Ela pede a senha definida na variável de ambiente `SUPPORT_ADMIN_TOKEN`
+(cadastre no Railway, na aba Variables, do mesmo jeito que o
+`MERCADOPAGO_ACCESS_TOKEN`). **Sem essa variável, o atendimento fica
+desativado** — o motoboy até consegue enviar mensagens, mas ninguém
+consegue responder.
+
+A tela mostra a caixa de entrada com todos os motoboys que escreveram
+(destacando quem está aguardando resposta), abre a conversa ao clicar, e
+permite responder ali mesmo. Ela se atualiza sozinha a cada 8 segundos, sem
+apagar uma resposta que esteja sendo digitada. Funciona em celular e em
+computador.
+
+Essa senha é compartilhada por toda a equipe de atendimento — troque-a no
+Railway se alguém sair do time.
+
+As rotas por trás da tela, caso você queira integrar com outra ferramenta:
+
+| Rota | O que faz |
+|---|---|
+| `GET /api/support/threads` | Lista os motoboys que escreveram, mais recentes primeiro, marcando quem está aguardando resposta |
+| `GET /api/support/threads/:motoboyId` | Abre a conversa de um motoboy |
+| `POST /api/support/threads/:motoboyId/reply` | Responde `{text}` |
+
+Todas exigem o cabeçalho `Authorization: Bearer SEU_SUPPORT_ADMIN_TOKEN`.
 
 ## Próximo passo
 

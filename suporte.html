@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Despacho — Atendimento</title>
+<meta name="theme-color" content="#101215">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#101215;
+    --surface:#1B1E23;
+    --surface-2:#23272E;
+    --border:#2B3038;
+    --text:#F4F5F1;
+    --muted:#8B929B;
+    --lime:#C6FF3D;
+    --orange:#FF6A3D;
+    --amber:#FFC93D;
+    --font-display:'Archivo Black', sans-serif;
+    --font-body:'Inter', sans-serif;
+    --font-mono:'IBM Plex Mono', monospace;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--font-body);
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--lime);color:#101215;}
+
+  .topbar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:18px 20px 14px;
+    border-bottom:1px solid var(--border);
+    position:sticky; top:0;
+    background:rgba(16,18,21,0.94);
+    backdrop-filter:blur(6px);
+    z-index:20;
+  }
+  .brand{display:flex;align-items:baseline;gap:8px;}
+  .brand-mark{font-family:var(--font-display);font-size:17px;letter-spacing:0.5px;}
+  .brand-tag{font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;}
+  .btn-ghost{
+    background:none;border:1px solid var(--border);color:var(--muted);
+    font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;
+    padding:7px 10px;border-radius:5px;cursor:pointer;
+  }
+  .btn-ghost:hover{border-color:var(--muted);color:var(--text);}
+
+  .layout{max-width:1100px;margin:0 auto;padding:22px 20px 60px;}
+  .eyebrow{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin:0 0 6px;}
+  h1.page-title{font-family:var(--font-display);font-size:24px;line-height:1.15;margin:0 0 6px;}
+  p.page-sub{color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 24px;}
+
+  .field{margin-bottom:16px;}
+  label{
+    display:block;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;
+    letter-spacing:0.5px;color:var(--muted);margin-bottom:7px;
+  }
+  input[type=text], input[type=password], textarea{
+    width:100%;background:var(--surface-2);border:1px solid var(--border);color:var(--text);
+    font-family:var(--font-body);font-size:15px;padding:12px 13px;border-radius:7px;outline:none;
+  }
+  input:focus, textarea:focus{border-color:var(--lime);}
+  textarea{resize:vertical;min-height:80px;}
+  .btn-primary{
+    width:100%;background:var(--lime);color:#0E1210;border:none;
+    font-family:var(--font-display);font-size:14px;padding:15px 16px;border-radius:8px;cursor:pointer;
+  }
+  .btn-primary:hover{filter:brightness(1.06);}
+  .btn-primary:disabled{opacity:0.4;cursor:not-allowed;}
+  .btn-secondary{
+    background:none;border:1px solid var(--border);color:var(--text);
+    font-family:var(--font-mono);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;
+    padding:11px 16px;border-radius:8px;cursor:pointer;
+  }
+  .btn-secondary:hover{border-color:var(--muted);}
+
+  .login-box{max-width:420px;margin:60px auto 0;}
+
+  /* Two-column on desktop, stacked on mobile */
+  .split{display:grid;grid-template-columns:340px 1fr;gap:18px;align-items:start;}
+  @media (max-width:820px){ .split{grid-template-columns:1fr;} }
+
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;}
+  .panel-title{
+    font-family:var(--font-display);font-size:13px;text-transform:uppercase;letter-spacing:0.3px;
+    margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;
+  }
+  .refresh-note{font-family:var(--font-mono);font-size:10px;color:var(--muted);text-transform:none;letter-spacing:0;}
+
+  .thread-list{display:flex;flex-direction:column;gap:8px;max-height:70vh;overflow-y:auto;}
+  .thread-item{
+    background:var(--surface-2);border:1px solid var(--border);border-radius:8px;
+    padding:11px 12px;cursor:pointer;
+  }
+  .thread-item:hover{border-color:var(--muted);}
+  .thread-item.is-active{border-color:var(--lime);}
+  .thread-item.is-waiting{border-left:3px solid var(--amber);}
+  .thread-name{font-size:14px;font-weight:600;display:flex;justify-content:space-between;gap:8px;align-items:center;}
+  .waiting-tag{
+    font-family:var(--font-mono);font-size:9px;text-transform:uppercase;letter-spacing:0.5px;
+    background:var(--amber);color:#1a1500;padding:3px 7px;border-radius:20px;white-space:nowrap;
+  }
+  .thread-last{font-size:12px;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .thread-time{font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:4px;}
+
+  .messages{
+    max-height:52vh;overflow-y:auto;background:var(--surface-2);border:1px solid var(--border);
+    border-radius:8px;padding:14px;margin-bottom:14px;display:flex;flex-direction:column;gap:10px;
+  }
+  .msg{max-width:78%;padding:9px 12px;border-radius:10px;}
+  .msg.is-motoboy{align-self:flex-start;background:var(--surface);border:1px solid var(--border);}
+  .msg.is-support{align-self:flex-end;background:rgba(198,255,61,0.12);border:1px solid rgba(198,255,61,0.35);}
+  .msg-text{font-size:13.5px;line-height:1.45;white-space:pre-wrap;}
+  .msg-meta{font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:5px;}
+  .msg-order{
+    font-family:var(--font-mono);font-size:10px;color:var(--amber);
+    margin-top:5px;
+  }
+
+  .empty{text-align:center;padding:50px 20px;color:var(--muted);}
+  .empty-emoji{font-size:30px;display:block;margin-bottom:12px;}
+  .empty-text{font-size:13px;line-height:1.5;}
+
+  .toast{
+    position:fixed;bottom:28px;left:50%;transform:translateX(-50%);
+    background:var(--surface-2);border:1px solid var(--lime);color:var(--text);
+    font-family:var(--font-mono);font-size:12px;padding:11px 18px;border-radius:8px;z-index:60;
+  }
+  .warn{
+    background:#3A1600;border:1px solid var(--orange);color:#FFD0B8;
+    font-size:12px;line-height:1.5;padding:11px 14px;border-radius:8px;margin-bottom:16px;
+  }
+  .hint{font-size:11px;color:var(--muted);margin-top:7px;line-height:1.4;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+(function(){
+  // Where the API lives. Same server that serves this page by default, so
+  // this usually needs no editing — change it only if you host this file
+  // somewhere other than the API itself.
+  const DEFAULT_API_BASE = window.location.origin;
+
+  const root = document.getElementById('app');
+
+  let state = {
+    screen: 'login',       // login | inbox
+    apiBase: DEFAULT_API_BASE,
+    token: '',
+    threads: [],
+    selectedId: null,
+    messages: [],
+    draft: '',
+    toast: null,
+    loading: false
+  };
+
+  function esc(s){
+    return (s||'').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function formatDateTime(ts){
+    const d = new Date(ts);
+    return d.toLocaleDateString('pt-BR') + ' · ' + d.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
+  }
+  function timeAgo(ts){
+    const diff = Math.floor((Date.now()-ts)/1000);
+    if(diff<60) return 'agora';
+    if(diff<3600) return Math.floor(diff/60)+' min atrás';
+    if(diff<86400) return Math.floor(diff/3600)+' h atrás';
+    return Math.floor(diff/86400)+' d atrás';
+  }
+  function showToast(msg){
+    state.toast = msg;
+    render();
+    setTimeout(()=>{ if(state.toast===msg){ state.toast=null; render(); } }, 2600);
+  }
+
+  function authHeaders(){
+    return state.token ? {'Authorization':'Bearer '+state.token} : {};
+  }
+  async function apiGet(path){
+    try{
+      const res = await fetch(state.apiBase + path, {headers: authHeaders()});
+      if(res.status === 401){ handleBadToken(); return null; }
+      if(!res.ok) return null;
+      return await res.json();
+    }catch(e){ console.error('GET falhou', path, e); return null; }
+  }
+  async function apiPost(path, body){
+    try{
+      const res = await fetch(state.apiBase + path, {
+        method:'POST',
+        headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
+        body: JSON.stringify(body||{})
+      });
+      const data = await res.json().catch(()=>null);
+      if(res.status === 401){ handleBadToken(); return {error:'Senha do suporte inválida'}; }
+      if(!res.ok) return {error:(data && data.error) || 'Erro no servidor'};
+      return data || {};
+    }catch(e){ console.error('POST falhou', path, e); return {error:'Não consegui falar com o servidor'}; }
+  }
+  function handleBadToken(){
+    try{ sessionStorage.removeItem('support-token'); }catch(e){}
+    state.token = '';
+    state.screen = 'login';
+    state.threads = [];
+    state.selectedId = null;
+    state.messages = [];
+    showToast('Senha do suporte inválida ou expirada');
+  }
+
+  // ---------- actions ----------
+  async function doLogin(token, apiBase){
+    state.token = token;
+    if(apiBase) state.apiBase = apiBase.trim().replace(/\/+$/,'');
+    const list = await apiGet('/api/support/threads');
+    if(list === null){
+      if(state.token) showToast('Não consegui entrar — confira a senha e o endereço do servidor');
+      return;
+    }
+    try{ sessionStorage.setItem('support-token', state.token); }catch(e){}
+    try{ sessionStorage.setItem('support-api', state.apiBase); }catch(e){}
+    state.threads = list;
+    state.screen = 'inbox';
+    render();
+  }
+
+  function logout(){
+    try{ sessionStorage.removeItem('support-token'); }catch(e){}
+    state.token = '';
+    state.screen = 'login';
+    state.threads = [];
+    state.selectedId = null;
+    state.messages = [];
+    render();
+  }
+
+  async function refreshThreads(){
+    const list = await apiGet('/api/support/threads');
+    if(list) state.threads = list;
+  }
+
+  async function openThread(motoboyId){
+    state.selectedId = motoboyId;
+    state.messages = [];
+    state.draft = '';
+    render();
+    const list = await apiGet('/api/support/threads/'+motoboyId);
+    if(list) state.messages = list;
+    render();
+    scrollMessagesToBottom();
+  }
+
+  async function sendReply(){
+    const text = (state.draft||'').trim();
+    if(!text || !state.selectedId) return;
+    const btn = root.querySelector('#btn-send');
+    if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+    const result = await apiPost('/api/support/threads/'+state.selectedId+'/reply', {text});
+    if(result.error){
+      showToast(result.error);
+      if(btn){ btn.disabled = false; btn.textContent = 'Responder'; }
+      return;
+    }
+    state.draft = '';
+    const list = await apiGet('/api/support/threads/'+state.selectedId);
+    if(list) state.messages = list;
+    await refreshThreads();
+    render();
+    scrollMessagesToBottom();
+  }
+
+  function scrollMessagesToBottom(){
+    const box = root.querySelector('#messages');
+    if(box) box.scrollTop = box.scrollHeight;
+  }
+
+  // ---------- render ----------
+  function render(){
+    root.innerHTML = '';
+
+    const bar = document.createElement('div');
+    bar.className = 'topbar';
+    bar.innerHTML = `
+      <div class="brand">
+        <span class="brand-mark">DESPACHO</span>
+        <span class="brand-tag">atendimento</span>
+      </div>
+      <div>${state.screen==='inbox' ? `<button class="btn-ghost" id="btn-logout">Sair</button>` : ''}</div>
+    `;
+    root.appendChild(bar);
+
+    const layout = document.createElement('div');
+    layout.className = 'layout';
+
+    if(state.screen === 'login') layout.appendChild(renderLogin());
+    else layout.appendChild(renderInbox());
+
+    root.appendChild(layout);
+
+    if(state.toast){
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.textContent = state.toast;
+      root.appendChild(t);
+    }
+
+    attachHandlers();
+  }
+
+  function renderLogin(){
+    const d = document.createElement('div');
+    d.className = 'login-box';
+    d.innerHTML = `
+      <p class="eyebrow">Acesso restrito</p>
+      <h1 class="page-title">Atendimento</h1>
+      <p class="page-sub">Tela interna da equipe de suporte. Use a senha configurada no servidor (SUPPORT_ADMIN_TOKEN).</p>
+      <form id="form-login" novalidate>
+        <div class="field">
+          <label>Senha do suporte</label>
+          <input type="password" name="token" placeholder="••••••••••">
+        </div>
+        <div class="field">
+          <label>Endereço do servidor</label>
+          <input type="text" name="apiBase" value="${esc(state.apiBase)}">
+          <div class="hint">Deixe como está se esta página foi aberta pelo próprio servidor.</div>
+        </div>
+        <button type="button" class="btn-primary" id="btn-login">Entrar</button>
+      </form>
+    `;
+    return d;
+  }
+
+  function renderInbox(){
+    const d = document.createElement('div');
+    const waiting = state.threads.filter(t=>t.awaitingReply).length;
+
+    d.innerHTML = `
+      <p class="eyebrow">Suporte</p>
+      <h1 class="page-title">Conversas</h1>
+      <p class="page-sub">${state.threads.length} motoboy${state.threads.length===1?'':'s'} no total · ${waiting} aguardando resposta</p>
+      <div class="split">
+        <div class="panel">
+          <div class="panel-title">
+            <span>Caixa de entrada</span>
+            <span class="refresh-note">atualiza sozinho</span>
+          </div>
+          <div class="thread-list" id="thread-list"></div>
+        </div>
+        <div class="panel" id="conversation"></div>
+      </div>
+    `;
+
+    const list = d.querySelector('#thread-list');
+    if(state.threads.length === 0){
+      list.innerHTML = `<div class="empty"><span class="empty-emoji">📭</span><div class="empty-text">Nenhuma mensagem ainda.</div></div>`;
+    } else {
+      state.threads.forEach(t=>{
+        const item = document.createElement('div');
+        item.className = 'thread-item'
+          + (t.motoboyId===state.selectedId ? ' is-active' : '')
+          + (t.awaitingReply ? ' is-waiting' : '');
+        item.setAttribute('data-thread', t.motoboyId);
+        item.innerHTML = `
+          <div class="thread-name">
+            <span>🏍️ ${esc(t.motoboyName)}</span>
+            ${t.awaitingReply ? `<span class="waiting-tag">aguardando</span>` : ''}
+          </div>
+          <div class="thread-last">${esc(t.lastMessageText)}</div>
+          <div class="thread-time">${timeAgo(t.lastMessageAt)} · ${t.messageCount} mensagem${t.messageCount===1?'':'s'}</div>
+        `;
+        list.appendChild(item);
+      });
+    }
+
+    const conv = d.querySelector('#conversation');
+    if(!state.selectedId){
+      conv.innerHTML = `<div class="empty"><span class="empty-emoji">💬</span><div class="empty-text">Escolha uma conversa à esquerda para ler e responder.</div></div>`;
+    } else {
+      const thread = state.threads.find(t=>t.motoboyId===state.selectedId);
+      const name = thread ? thread.motoboyName : '';
+      const phone = thread && thread.motoboyPhone ? thread.motoboyPhone : '';
+      const msgsHtml = state.messages.length === 0
+        ? `<div class="empty"><div class="empty-text">Carregando…</div></div>`
+        : state.messages.map(m=>`
+            <div class="msg ${m.fromType==='motoboy'?'is-motoboy':'is-support'}">
+              <div class="msg-text">${esc(m.text)}</div>
+              ${m.orderId ? `<div class="msg-order">📦 Entrega #${esc(m.orderId.slice(-6).toUpperCase())}</div>` : ''}
+              <div class="msg-meta">${m.fromType==='motoboy'?esc(name):'Suporte'} · ${formatDateTime(m.createdAt)}</div>
+            </div>
+          `).join('');
+
+      conv.innerHTML = `
+        <div class="panel-title">
+          <span>🏍️ ${esc(name)}</span>
+          ${phone ? `<span class="refresh-note">${esc(phone)}</span>` : ''}
+        </div>
+        <div class="messages" id="messages">${msgsHtml}</div>
+        <div class="field" style="margin-bottom:10px;">
+          <textarea id="reply-input" placeholder="Escreva a resposta…">${esc(state.draft||'')}</textarea>
+        </div>
+        <button type="button" class="btn-primary" id="btn-send">Responder</button>
+      `;
+    }
+
+    return d;
+  }
+
+  function attachHandlers(){
+    const $ = sel => root.querySelector(sel);
+
+    const btnLogin = $('#btn-login');
+    if(btnLogin) btnLogin.onclick = ()=>{
+      const form = $('#form-login');
+      const fd = new FormData(form);
+      const token = (fd.get('token')||'').toString().trim();
+      const apiBase = (fd.get('apiBase')||'').toString().trim();
+      if(!token){ showToast('Digite a senha do suporte'); return; }
+      btnLogin.disabled = true;
+      btnLogin.textContent = 'Entrando…';
+      doLogin(token, apiBase).finally(()=>{
+        const b = root.querySelector('#btn-login');
+        if(b){ b.disabled = false; b.textContent = 'Entrar'; }
+      });
+    };
+
+    const btnLogout = $('#btn-logout');
+    if(btnLogout) btnLogout.onclick = logout;
+
+    root.querySelectorAll('[data-thread]').forEach(elm=>{
+      elm.onclick = ()=>openThread(elm.getAttribute('data-thread'));
+    });
+
+    const replyInput = $('#reply-input');
+    if(replyInput) replyInput.oninput = (e)=>{ state.draft = e.target.value; };
+
+    const btnSend = $('#btn-send');
+    if(btnSend) btnSend.onclick = sendReply;
+  }
+
+  // Keeps the inbox current without wiping a reply being typed.
+  setInterval(async ()=>{
+    if(state.screen !== 'inbox') return;
+    if((state.draft||'').trim()) return; // don't re-render mid-typing
+    await refreshThreads();
+    if(state.selectedId){
+      const list = await apiGet('/api/support/threads/'+state.selectedId);
+      if(list) state.messages = list;
+    }
+    render();
+  }, 8000);
+
+  // Restore a session within the same browser tab.
+  (function boot(){
+    let savedToken = '';
+    let savedApi = '';
+    try{
+      savedToken = sessionStorage.getItem('support-token') || '';
+      savedApi = sessionStorage.getItem('support-api') || '';
+    }catch(e){}
+    if(savedApi) state.apiBase = savedApi;
+    if(savedToken){
+      doLogin(savedToken, savedApi || state.apiBase).catch(()=>render());
+    }
+    render();
+  })();
+})();
+</script>
+</body>
+</html>
