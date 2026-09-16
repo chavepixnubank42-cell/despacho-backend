@@ -1907,7 +1907,58 @@ app.post('/api/orders/:id/support', requireAuth('motoboy'), (req, res) => {
   res.json(o);
 });
 
-// One helper for the straight-line stage transitions that DON'T need a
+// ---------------------------------------------------------------
+// Suporte GERAL — pro motoboy falar com o suporte a qualquer momento,
+// mesmo sem corrida ativa (o /support acima só funciona com corrida em
+// andamento). Aparece numa lista separada pro admin, já que não tem uma
+// corrida pra "encerrar"/"devolver" — só marca resolvido.
+// ---------------------------------------------------------------
+app.post('/api/support/general', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const motoboy = db.motoboys[req.authId];
+  if (!motoboy) return res.status(404).json({ error: 'Não encontrado' });
+  const { reason, note } = req.body || {};
+  if (!SUPPORT_REASONS.includes(reason)) return res.status(400).json({ error: 'Selecione um motivo válido' });
+  const id = shortId('ticket');
+  db.generalTickets[id] = {
+    id,
+    motoboyId: motoboy.id,
+    motoboyName: motoboy.name,
+    motoboyPhone: motoboy.phone,
+    reason,
+    note: (note || '').trim() || null,
+    status: 'aberto',
+    reportedAt: Date.now(),
+    resolvedAt: null
+  };
+  saveDB(db);
+  res.json(db.generalTickets[id]);
+});
+
+app.get('/api/admin/general-tickets', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.generalTickets)
+    .filter((t) => (req.query.status ? t.status === req.query.status : true))
+    .sort((a, b) => (b.reportedAt || 0) - (a.reportedAt || 0));
+  res.json(list.slice(0, 300));
+});
+
+app.patch('/api/admin/general-tickets/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const t = db.generalTickets[req.params.id];
+  if (!t) return res.status(404).json({ error: 'Não encontrado' });
+  if (req.body && req.body.status === 'resolvido') {
+    t.status = 'resolvido';
+    t.resolvedAt = Date.now();
+  } else if (req.body && req.body.status === 'aberto') {
+    t.status = 'aberto';
+    t.resolvedAt = null;
+  }
+  saveDB(db);
+  res.json(t);
+});
+
+
 // GPS check (departing doesn't require proximity to anything). Only the
 // motoboy assigned to this specific order can advance it.
 function stageTransition(fromStatus, toStatus, extraFields) {

@@ -150,6 +150,7 @@
     messages: [],
     supportTickets: [],
     banners: [],
+    generalTickets: [],
     bannerModal: null, // {id?, imageUrl, audience, linkType, linkValue, active, priority, startAt, endAt} while the form is open
     freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
     messageModal: null, // {audience, type, title, body, ids} while the compose dialog is open
@@ -230,14 +231,15 @@
   }
 
   async function loadAll(){
-    const [summary, businesses, motoboys, orders, messages, supportTickets, banners] = await Promise.all([
+    const [summary, businesses, motoboys, orders, messages, supportTickets, banners, generalTickets] = await Promise.all([
       api('GET', '/api/admin/summary'),
       api('GET', '/api/admin/businesses'),
       api('GET', '/api/admin/motoboys'),
       api('GET', '/api/admin/orders'),
       api('GET', '/api/admin/messages'),
       api('GET', '/api/admin/support-tickets'),
-      api('GET', '/api/admin/banners')
+      api('GET', '/api/admin/banners'),
+      api('GET', '/api/admin/general-tickets')
     ]);
     if(!summary.error) state.summary = summary;
     if(Array.isArray(businesses)) state.businesses = businesses;
@@ -246,6 +248,7 @@
     if(Array.isArray(messages)) state.messages = messages;
     if(Array.isArray(supportTickets)) state.supportTickets = supportTickets;
     if(Array.isArray(banners)) state.banners = banners;
+    if(Array.isArray(generalTickets)) state.generalTickets = generalTickets;
   }
 
   async function loadReport(){
@@ -302,6 +305,13 @@
     const result = await api('PATCH', '/api/admin/motoboys/'+id+'/approve', {approved:true});
     if(result.error){ showToast(result.error); return; }
     showToast('✓ Motoboy aprovado — já pode ficar on-line');
+    await loadAll(); render();
+  }
+
+  async function resolveGeneralTicket(id){
+    const result = await api('PATCH', '/api/admin/general-tickets/'+id, {status:'resolvido'});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Chamado marcado como resolvido');
     await loadAll(); render();
   }
 
@@ -742,6 +752,20 @@
         ${abertos.length ? abertos.map(o=>ticketRow(o,true)).join('') : '<p class="empty">Nenhum chamado de suporte em aberto no momento.</p>'}
         <p class="eyebrow" style="margin-top:22px;">Últimos resolvidos</p>
         ${resolvidos.length ? resolvidos.map(o=>ticketRow(o,false)).join('') : '<p class="empty">Nenhum chamado resolvido ainda.</p>'}
+        <p class="eyebrow" style="margin-top:22px;">Chamados gerais (motoboy falou sem estar em corrida)</p>
+        ${(state.generalTickets||[]).filter(t=>t.status==='aberto').map(t => `
+          <div class="row" style="flex-direction:column;align-items:stretch;border-color:var(--orange, #ff6a3d);">
+            <div class="row-main">
+              <span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ ${esc(SUPPORT_REASON_LABELS[t.reason]||t.reason)}</span>
+              <div class="row-sub">🏍️ ${esc(t.motoboyName)} ${t.motoboyPhone?'· 📱 '+esc(t.motoboyPhone):''}</div>
+              ${t.note ? `<div class="row-sub">💬 "${esc(t.note)}"</div>` : ''}
+              <div class="row-sub">Reportado em ${formatDateTime(t.reportedAt)}</div>
+            </div>
+            <div class="row-actions" style="margin-top:10px;">
+              <button class="btn-ghost btn-ok" data-general-ticket-resolve="${t.id}">Marcar como resolvido</button>
+            </div>
+          </div>
+        `).join('') || '<p class="empty">Nenhum chamado geral em aberto.</p>'}
       `;
     } else if(state.tab === 'mensagens'){
       body = `
@@ -819,7 +843,7 @@
         ${tabBtn('mapa','Mapa')}
         ${tabBtn('corridas','Corridas')}
         ${tabBtn('banners','Banners')}
-        ${tabBtn('suporte', 'Suporte' + ((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length ? ' ('+(state.supportTickets||[]).filter(t=>t.support.status==='aberto').length+')' : ''))}
+        ${tabBtn('suporte', 'Suporte' + (((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length + (state.generalTickets||[]).filter(t=>t.status==='aberto').length) ? ' ('+((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length + (state.generalTickets||[]).filter(t=>t.status==='aberto').length)+')' : ''))}
         ${tabBtn('mensagens','Mensagens')}
         ${tabBtn('relatorios','Relatórios')}
       </div>
@@ -1111,6 +1135,9 @@
       });
       root.querySelectorAll('[data-support-return]').forEach(el=>{
         el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-return'), 'return');
+      });
+      root.querySelectorAll('[data-general-ticket-resolve]').forEach(el=>{
+        el.onclick = ()=>resolveGeneralTicket(el.getAttribute('data-general-ticket-resolve'));
       });
       const confirmSupportActionBtn = document.getElementById('btn-confirm-support-action');
       if(confirmSupportActionBtn) confirmSupportActionBtn.onclick = ()=>{

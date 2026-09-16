@@ -2305,7 +2305,7 @@
     showToast('Corrida cancelada');
   }
 
-  // ---------- suporte (motoboy reporta um problema no meio da corrida) ----------
+  // ---------- suporte (durante uma corrida, OU a qualquer momento) ----------
   const SUPPORT_REASONS = [
     {id:'endereco_errado', label:'Endereço/localização errada'},
     {id:'cliente_ausente', label:'Cliente não atende / não está no local'},
@@ -2313,8 +2313,13 @@
     {id:'acidente_emergencia', label:'Acidente ou emergência'},
     {id:'outro', label:'Outro'}
   ];
+  // Só pro motivo de emergência — WhatsApp resolve na hora, sem esperar
+  // alguém ver o chamado interno. TODO: coloque aqui o número de WhatsApp
+  // real do suporte (com DDI+DDD, só números).
+  const SUPPORT_WHATSAPP_NUMBER = '5500000000000';
   function openSupportModal(orderId){
-    state.supportModal = {orderId, reason:null, note:''};
+    // orderId null = chamado geral (fora de uma corrida ativa)
+    state.supportModal = {orderId: orderId||null, reason:null, note:''};
     render();
   }
   function closeSupportModal(){
@@ -2326,14 +2331,15 @@
     if(!sm || !sm.reason) return;
     const btn = root.querySelector('#btn-confirm-support');
     if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
-    const result = await apiPost('/api/orders/'+sm.orderId+'/support', {reason: sm.reason, note: sm.note});
+    const endpoint = sm.orderId ? ('/api/orders/'+sm.orderId+'/support') : '/api/support/general';
+    const result = await apiPost(endpoint, {reason: sm.reason, note: sm.note});
     if(result.error){
       showToast(result.error);
       if(btn){ btn.disabled = false; btn.textContent = 'Avisar o suporte'; }
       return;
     }
     state.supportModal = null;
-    await refreshOrders();
+    if(sm.orderId) await refreshOrders();
     render();
     showToast('✅ Suporte avisado — alguém vai te ajudar em breve');
   }
@@ -2750,6 +2756,11 @@
         </div>
         <button type="button" class="btn-secondary" id="btn-change-password">Trocar senha</button>
       </form>
+      ${!isBusiness ? `
+        <div class="divider-text">precisa de ajuda?</div>
+        <button type="button" class="btn-secondary" id="btn-open-general-support" style="width:100%;">⚠️ Falar com o suporte</button>
+        <p class="row-sub" style="margin-top:8px;">Use isso pra qualquer dúvida ou problema, mesmo sem corrida ativa no momento.</p>
+      ` : ''}
       <div style="margin-top:22px;"><button class="btn-secondary" data-goto="${isBusiness?'business-dash':'motoboy-dash'}">← Voltar</button></div>
     `;
     return d;
@@ -3602,13 +3613,16 @@
 
     if(!sm.reason){
       // Passo 1: qual o problema.
+      const introText = sm.orderId
+        ? 'Isso avisa nosso suporte — não cancela nem encerra a corrida sozinho, alguém vai te orientar em seguida.'
+        : 'Isso avisa nosso suporte, mesmo sem corrida ativa agora. Alguém vai te orientar em seguida.';
       backdrop.innerHTML = `
         <div class="modal-sheet">
           <div class="modal-head">
             <span class="modal-title">⚠️ O que aconteceu?</span>
             <button class="modal-close" id="support-close">✕</button>
           </div>
-          <p class="page-sub" style="margin-bottom:14px;">Isso avisa nosso suporte — não cancela nem encerra a corrida sozinho, alguém vai te orientar em seguida.</p>
+          <p class="page-sub" style="margin-bottom:14px;">${introText}</p>
           <div class="reason-list">
             ${SUPPORT_REASONS.map(r => `<button class="reason-btn" data-pick-support-reason="${r.id}">${esc(r.label)}</button>`).join('')}
           </div>
@@ -3617,6 +3631,7 @@
     } else {
       // Passo 2: observação opcional + confirmação.
       const label = (SUPPORT_REASONS.find(r=>r.id===sm.reason)||{}).label || sm.reason;
+      const isEmergency = sm.reason === 'acidente_emergencia';
       backdrop.innerHTML = `
         <div class="modal-sheet">
           <div class="modal-head">
@@ -3624,6 +3639,14 @@
             <button class="modal-close" id="support-close">✕</button>
           </div>
           <p class="page-sub" style="margin-bottom:14px;">Motivo: <strong style="color:var(--text);">${esc(label)}</strong></p>
+          ${isEmergency ? `
+            <div class="support-flag" style="margin-bottom:14px;">
+              🚨 Emergência? Não espere o chamado — fale com a gente agora pelo WhatsApp.
+              <div style="margin-top:8px;">
+                <a class="btn-secondary" style="display:inline-block;text-decoration:none;" href="https://wa.me/${SUPPORT_WHATSAPP_NUMBER}" target="_blank">Chamar no WhatsApp agora</a>
+              </div>
+            </div>
+          ` : ''}
           <div class="field">
             <label>Detalhes (opcional)</label>
             <textarea id="support-note" placeholder="Conte rapidamente o que está acontecendo">${esc(sm.note||'')}</textarea>
@@ -3771,6 +3794,8 @@
     wireAuthForm('form-complete-motoboy', 'btn-submit-complete-motoboy', submitMotoboyCompleteProfile, {loadingText:'Salvando…'});
     wireAuthForm('form-profile', 'btn-save-profile', saveProfile, {loadingText:'Salvando…'});
     wireAuthForm('form-change-password', 'btn-change-password', changePassword, {loadingText:'Trocando…'});
+    const btnOpenGeneralSupport = $('#btn-open-general-support');
+    if(btnOpenGeneralSupport) btnOpenGeneralSupport.onclick = ()=>openSupportModal(null);
 
     const btnOpenProfile = $('#btn-open-profile');
     if(btnOpenProfile) btnOpenProfile.onclick = ()=>setState({screen:'profile'});
