@@ -44,7 +44,7 @@ const TMP_PATH = DB_PATH + '.tmp';
 const BAK_PATH = DB_PATH + '.bak';
 
 function emptyDB() {
-  return { businesses: {}, motoboys: {}, orders: {} };
+  return { businesses: {}, motoboys: {}, orders: {}, banners: {} };
 }
 
 function tryParse(raw) {
@@ -90,6 +90,9 @@ let cache = null;
 
 function loadDB() {
   if (!cache) cache = loadFromDisk();
+  // Old data.json files (from before banners existed) won't have this key —
+  // add it in place so the rest of the code can always assume it's there.
+  if (!cache.banners) cache.banners = {};
   return cache;
 }
 

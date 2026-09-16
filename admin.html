@@ -114,7 +114,14 @@
   .modal-box h2{ margin:0 0 14px; font-size:17px; }
   .msg-history-item{ border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:10px; background:var(--card); }
   .msg-history-item .row-sub{ margin-top:4px; }
+  #live-map{ width:100%; height:60vh; min-height:360px; border-radius:14px; border:1px solid var(--border); }
+  .map-legend{ display:flex; gap:14px; flex-wrap:wrap; margin:10px 0 14px; font-size:12px; color:var(--muted); }
+  .map-legend span{ display:inline-flex; align-items:center; gap:5px; }
+  .map-dot{ width:9px; height:9px; border-radius:50%; display:inline-block; }
+  .banner-thumb{ width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--border); flex-shrink:0; }
 </style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -142,10 +149,16 @@
     selectedMotoboyIds: new Set(),
     messages: [],
     supportTickets: [],
+    banners: [],
+    bannerModal: null, // {id?, imageUrl, audience, linkType, linkValue, active, priority, startAt, endAt} while the form is open
     freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
     messageModal: null, // {audience, type, title, body, ids} while the compose dialog is open
     supportActionModal: null // {orderId, action:'end'|'return', note} while the support-action dialog is open
   };
+  // Not part of state on purpose — this is view-only (map pan/zoom), and
+  // putting it in state would trigger a full re-render loop on every pan.
+  let liveMap = null;
+  let liveMapMarkers = [];
 
   function esc(s){
     return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -217,13 +230,14 @@
   }
 
   async function loadAll(){
-    const [summary, businesses, motoboys, orders, messages, supportTickets] = await Promise.all([
+    const [summary, businesses, motoboys, orders, messages, supportTickets, banners] = await Promise.all([
       api('GET', '/api/admin/summary'),
       api('GET', '/api/admin/businesses'),
       api('GET', '/api/admin/motoboys'),
       api('GET', '/api/admin/orders'),
       api('GET', '/api/admin/messages'),
-      api('GET', '/api/admin/support-tickets')
+      api('GET', '/api/admin/support-tickets'),
+      api('GET', '/api/admin/banners')
     ]);
     if(!summary.error) state.summary = summary;
     if(Array.isArray(businesses)) state.businesses = businesses;
@@ -231,6 +245,7 @@
     if(Array.isArray(orders)) state.orders = orders;
     if(Array.isArray(messages)) state.messages = messages;
     if(Array.isArray(supportTickets)) state.supportTickets = supportTickets;
+    if(Array.isArray(banners)) state.banners = banners;
   }
 
   async function loadReport(){
@@ -247,7 +262,7 @@
       // form open, the free-credits/message modals, or the compose fields
       // on the Mensagens tab (those aren't tracked in state, so a re-render
       // would wipe them outright).
-      if(state.editingId || state.freeCreditsModal || state.messageModal || state.supportActionModal || state.tab === 'mensagens') return;
+      if(state.editingId || state.freeCreditsModal || state.messageModal || state.supportActionModal || state.bannerModal || state.tab === 'mensagens') return;
       await loadAll();
       if(state.tab === 'relatorios') await loadReport();
       render();
@@ -289,6 +304,88 @@
     showToast('✓ Motoboy aprovado — já pode ficar on-line');
     await loadAll(); render();
   }
+
+  // ---------- banners ----------
+  function openBannerModal(existing){
+    state.bannerModal = existing ? Object.assign({}, existing) : {
+      id: null, imageUrl:'', audience:'both', linkType:'none', linkValue:'',
+      active:true, priority:0, startAt:null, endAt:null
+    };
+    render();
+  }
+  function closeBannerModal(){ state.bannerModal = null; render(); }
+  async function saveBanner(){
+    const m = state.bannerModal;
+    if(!m.imageUrl || !m.imageUrl.trim()){ showToast('Preencha a URL da imagem'); return; }
+    const payload = {
+      imageUrl: m.imageUrl, audience: m.audience, linkType: m.linkType,
+      linkValue: m.linkValue, active: m.active, priority: m.priority,
+      startAt: m.startAt, endAt: m.endAt
+    };
+    const result = m.id
+      ? await api('PATCH', '/api/admin/banners/'+m.id, payload)
+      : await api('POST', '/api/admin/banners', payload);
+    if(result.error){ showToast(result.error); return; }
+    showToast(m.id ? 'Banner atualizado' : 'Banner criado');
+    state.bannerModal = null;
+    await loadAll(); render();
+  }
+  async function toggleBannerActive(id, active){
+    const result = await api('PATCH', '/api/admin/banners/'+id, {active});
+    if(result.error){ showToast(result.error); return; }
+    showToast(active ? 'Banner ativado' : 'Banner desativado');
+    await loadAll(); render();
+  }
+  async function deleteBanner(id){
+    if(!confirm('Excluir esse banner permanentemente?')) return;
+    const result = await api('DELETE', '/api/admin/banners/'+id, {});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Banner excluído');
+    await loadAll(); render();
+  }
+
+  // ---------- mapa ao vivo ----------
+  function renderLiveMap(){
+    const container = document.getElementById('live-map');
+    if(!container || typeof L === 'undefined') return;
+    const LOCATION_FRESHNESS_MS = 10 * 60 * 1000;
+    const tracked = (state.motoboys||[]).filter(m =>
+      m.status === 'online' && m.lastLocation &&
+      typeof m.lastLocation.lat === 'number' &&
+      (Date.now() - (m.lastLocation.updatedAt||0)) <= LOCATION_FRESHNESS_MS
+    );
+
+    // The whole panel re-renders (rebuilds the DOM) on every poll, so the
+    // map container itself is a brand-new element each time — we can't
+    // just "update markers" on the old instance. Re-create it, but keep
+    // whatever center/zoom the admin last had, so it doesn't keep
+    // snapping back and undoing a manual pan/zoom every 8s.
+    const prevView = liveMap ? {center: liveMap.getCenter(), zoom: liveMap.getZoom()} : null;
+    liveMap = L.map(container, {attributionControl:false});
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(liveMap);
+    liveMapMarkers = [];
+
+    if(tracked.length){
+      const bounds = [];
+      tracked.forEach(m => {
+        const {lat, lng, acc} = m.lastLocation;
+        const marker = L.circleMarker([lat,lng], {
+          radius:9, color:'#0B0B0F', weight:2, fillColor:'#4CD964', fillOpacity:0.95
+        }).addTo(liveMap);
+        marker.bindPopup(`<strong>${esc(m.name)}</strong><br>${esc(m.vehicle||'')}<br>Precisão: ${acc!=null?acc+'m':'?'}<br>Atualizado ${formatDateTime(m.lastLocation.updatedAt)}`);
+        liveMapMarkers.push(marker);
+        bounds.push([lat,lng]);
+      });
+      if(prevView){
+        liveMap.setView(prevView.center, prevView.zoom);
+      } else {
+        liveMap.fitBounds(bounds, {padding:[30,30], maxZoom:15});
+      }
+    } else {
+      liveMap.setView(prevView ? prevView.center : [-21.1367, -47.9909], prevView ? prevView.zoom : 12); // Sertãozinho/SP como padrão se não houver nenhum motoboy rastreado ainda
+    }
+  }
+
   async function saveBusinessEdit(id, data){
     const result = await api('PATCH', '/api/admin/businesses/'+id, data);
     if(result.error){ showToast(result.error); return; }
@@ -558,6 +655,21 @@
         </div>
       `).join('') || '<p class="empty">Nenhum motoboy cadastrado ainda.</p>'}
       `;
+    } else if(state.tab === 'mapa'){
+      const LOCATION_FRESHNESS_MS = 10 * 60 * 1000; // igual ao servidor
+      const tracked = (state.motoboys||[]).filter(m =>
+        m.status === 'online' && m.lastLocation &&
+        typeof m.lastLocation.lat === 'number' &&
+        (Date.now() - (m.lastLocation.updatedAt||0)) <= LOCATION_FRESHNESS_MS
+      );
+      body = `
+        <div class="map-legend">
+          <span><span class="map-dot" style="background:var(--ok);"></span> On-line com localização recente</span>
+          <span style="color:var(--muted);">${tracked.length} de ${(state.motoboys||[]).filter(m=>m.status==='online').length} motoboy(s) on-line aparecendo no mapa agora</span>
+        </div>
+        <div id="live-map"></div>
+        <p class="row-sub" style="margin-top:10px;">Só aparecem aqui motoboys on-line com uma localização enviada nos últimos 10 minutos. O pino atualiza sozinho a cada 8 segundos, junto com o resto do painel.</p>
+      `;
     } else if(state.tab === 'corridas'){
       body = (state.orders||[]).slice(0,100).map(o => `
         <div class="row">
@@ -570,6 +682,38 @@
           </div>
         </div>
       `).join('') || '<p class="empty">Nenhuma corrida ainda.</p>';
+    } else if(state.tab === 'banners'){
+      const AUDIENCE_LABELS = {motoboy:'Motoboys', business:'Comércios', both:'Motoboys e comércios'};
+      const now = Date.now();
+      const statusOf = (b) => {
+        if(!b.active) return {label:'Desativado', color:'var(--muted)'};
+        if(b.startAt && b.startAt > now) return {label:'Agendado', color:'var(--warn)'};
+        if(b.endAt && b.endAt < now) return {label:'Expirado', color:'var(--muted)'};
+        return {label:'Ativo agora', color:'var(--ok)'};
+      };
+      body = `
+        <div style="margin-bottom:14px;">
+          <button class="btn btn-ok" id="btn-new-banner">+ Novo banner</button>
+        </div>
+        ${(state.banners||[]).sort((a,b)=>(b.priority||0)-(a.priority||0)).map(b => {
+          const st = statusOf(b);
+          return `
+          <div class="row" style="align-items:flex-start;">
+            <img class="banner-thumb" src="${esc(b.imageUrl)}" alt="">
+            <div class="row-main">
+              <strong>${AUDIENCE_LABELS[b.audience]||b.audience}</strong>
+              <span class="badge" style="background:transparent;border:1px solid ${st.color};color:${st.color};">${st.label}</span>
+              <div class="row-sub">Prioridade ${b.priority||0} · Link: ${b.linkType==='none'?'nenhum':(b.linkType==='external'?'externo':'interno')}${b.linkValue?' — '+esc(b.linkValue):''}</div>
+              <div class="row-sub">${b.startAt?'Início '+formatDateTime(b.startAt):'Sem início agendado'} · ${b.endAt?'Fim '+formatDateTime(b.endAt):'Sem fim definido'}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn-ghost" data-edit-banner="${b.id}">Editar</button>
+              <button class="btn-ghost ${b.active?'btn-danger':'btn-ok'}" data-toggle-banner="${b.id}" data-active="${b.active?'0':'1'}">${b.active?'Desativar':'Ativar'}</button>
+              <button class="btn-ghost btn-danger" data-delete-banner="${b.id}">Excluir</button>
+            </div>
+          </div>
+        `;}).join('') || '<p class="empty">Nenhum banner criado ainda.</p>'}
+      `;
     } else if(state.tab === 'suporte'){
       const abertos = (state.supportTickets||[]).filter(t=>t.support.status==='aberto');
       const resolvidos = (state.supportTickets||[]).filter(t=>t.support.status==='resolvido').slice(0,20);
@@ -672,7 +816,9 @@
         ${tabBtn('resumo','Resumo')}
         ${tabBtn('comercios','Comércios')}
         ${tabBtn('motoboys','Motoboys')}
+        ${tabBtn('mapa','Mapa')}
         ${tabBtn('corridas','Corridas')}
+        ${tabBtn('banners','Banners')}
         ${tabBtn('suporte', 'Suporte' + ((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length ? ' ('+(state.supportTickets||[]).filter(t=>t.support.status==='aberto').length+')' : ''))}
         ${tabBtn('mensagens','Mensagens')}
         ${tabBtn('relatorios','Relatórios')}
@@ -734,6 +880,66 @@
         </div>
       `;
     }
+    if(state.bannerModal){
+      const m = state.bannerModal;
+      const toLocalInput = (ts) => {
+        if(!ts) return '';
+        const d = new Date(ts);
+        const pad = (n)=>String(n).padStart(2,'0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
+      html += `
+        <div class="modal-overlay" id="modal-overlay-banner">
+          <div class="modal-box">
+            <h2>${m.id ? '🖼️ Editar banner' : '🖼️ Novo banner'}</h2>
+            <div class="field">
+              <label>URL da imagem (o banner inteiro é essa imagem)</label>
+              <input class="edit-input" id="banner-imageUrl" value="${esc(m.imageUrl||'')}" placeholder="https://...">
+            </div>
+            ${m.imageUrl ? `<img src="${esc(m.imageUrl)}" style="width:100%;border-radius:10px;margin-bottom:14px;border:1px solid var(--border);">` : ''}
+            <div class="field">
+              <label>Público-alvo</label>
+              <select class="edit-input" id="banner-audience">
+                <option value="both" ${m.audience==='both'?'selected':''}>Motoboys e comércios</option>
+                <option value="motoboy" ${m.audience==='motoboy'?'selected':''}>Só motoboys</option>
+                <option value="business" ${m.audience==='business'?'selected':''}>Só comércios</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Ao tocar no banner</label>
+              <select class="edit-input" id="banner-linkType">
+                <option value="none" ${m.linkType==='none'?'selected':''}>Nenhuma ação (só informativo)</option>
+                <option value="external" ${m.linkType==='external'?'selected':''}>Abrir link externo</option>
+                <option value="internal" ${m.linkType==='internal'?'selected':''}>Abrir link/tela interna do app</option>
+              </select>
+            </div>
+            <div class="field" id="banner-linkValue-field" style="${m.linkType==='none'?'display:none;':''}">
+              <label>Endereço do link</label>
+              <input class="edit-input" id="banner-linkValue" value="${esc(m.linkValue||'')}" placeholder="https://... ou /caminho-interno">
+            </div>
+            <div class="field">
+              <label>Início (opcional — deixe em branco pra valer desde já)</label>
+              <input class="edit-input" type="datetime-local" id="banner-startAt" value="${toLocalInput(m.startAt)}">
+            </div>
+            <div class="field">
+              <label>Fim (opcional — deixe em branco pra não expirar sozinho)</label>
+              <input class="edit-input" type="datetime-local" id="banner-endAt" value="${toLocalInput(m.endAt)}">
+            </div>
+            <div class="field">
+              <label>Prioridade (maior número aparece primeiro na rotação)</label>
+              <input class="edit-input" type="number" id="banner-priority" value="${m.priority||0}">
+            </div>
+            <div class="field">
+              <label><input type="checkbox" id="banner-active" ${m.active!==false?'checked':''}> Ativo</label>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn btn-ok" id="btn-confirm-banner">Salvar</button>
+              <button class="btn-ghost" id="btn-cancel-banner">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
     if(state.supportActionModal){
       const m = state.supportActionModal;
       const isEnd = m.action === 'end';
@@ -783,6 +989,7 @@
     } else {
       const logoutBtn = document.getElementById('btn-logout');
       if(logoutBtn) logoutBtn.onclick = logout;
+      if(state.tab === 'mapa') renderLiveMap();
       root.querySelectorAll('[data-tab]').forEach(el=>{
         el.onclick = async ()=>{
           state.tab = el.getAttribute('data-tab');
@@ -937,6 +1144,43 @@
         msgAudienceSelect.onchange = syncTypeVisibility;
         syncTypeVisibility();
       }
+
+      // ---------- banners ----------
+      const btnNewBanner = document.getElementById('btn-new-banner');
+      if(btnNewBanner) btnNewBanner.onclick = ()=>openBannerModal(null);
+      root.querySelectorAll('[data-edit-banner]').forEach(el=>{
+        el.onclick = ()=>openBannerModal((state.banners||[]).find(b=>b.id===el.getAttribute('data-edit-banner')));
+      });
+      root.querySelectorAll('[data-toggle-banner]').forEach(el=>{
+        el.onclick = ()=>toggleBannerActive(el.getAttribute('data-toggle-banner'), el.getAttribute('data-active')==='1');
+      });
+      root.querySelectorAll('[data-delete-banner]').forEach(el=>{
+        el.onclick = ()=>deleteBanner(el.getAttribute('data-delete-banner'));
+      });
+      const bannerLinkTypeSelect = document.getElementById('banner-linkType');
+      const bannerLinkValueField = document.getElementById('banner-linkValue-field');
+      if(bannerLinkTypeSelect && bannerLinkValueField){
+        bannerLinkTypeSelect.onchange = ()=>{
+          bannerLinkValueField.style.display = bannerLinkTypeSelect.value==='none' ? 'none' : '';
+        };
+      }
+      const confirmBanner = document.getElementById('btn-confirm-banner');
+      if(confirmBanner) confirmBanner.onclick = ()=>{
+        const m = state.bannerModal;
+        m.imageUrl = (document.getElementById('banner-imageUrl')||{}).value || '';
+        m.audience = (document.getElementById('banner-audience')||{}).value || 'both';
+        m.linkType = (document.getElementById('banner-linkType')||{}).value || 'none';
+        m.linkValue = (document.getElementById('banner-linkValue')||{}).value || '';
+        const startVal = (document.getElementById('banner-startAt')||{}).value;
+        const endVal = (document.getElementById('banner-endAt')||{}).value;
+        m.startAt = startVal ? new Date(startVal).getTime() : null;
+        m.endAt = endVal ? new Date(endVal).getTime() : null;
+        m.priority = Number((document.getElementById('banner-priority')||{}).value) || 0;
+        m.active = !!(document.getElementById('banner-active')||{}).checked;
+        saveBanner();
+      };
+      const cancelBanner = document.getElementById('btn-cancel-banner');
+      if(cancelBanner) cancelBanner.onclick = closeBannerModal;
     }
   }
 

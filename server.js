@@ -729,6 +729,93 @@ app.patch('/api/admin/motoboys/:id/details', requireAuth('admin'), (req, res) =>
   res.json(sanitizeMotoboy(m));
 });
 
+// ---------------------------------------------------------------
+// Banners — pop-up de tela cheia (imagem única) mostrado ao abrir o app.
+// O ADM cria/edita tudo pelo painel; nenhum código precisa mudar depois.
+// ---------------------------------------------------------------
+const BANNER_AUDIENCES = ['motoboy', 'business', 'both'];
+const BANNER_LINK_TYPES = ['none', 'external', 'internal'];
+
+function sanitizeBannerInput(body, existing) {
+  const b = existing ? Object.assign({}, existing) : {};
+  if (typeof body.imageUrl === 'string') b.imageUrl = body.imageUrl.trim();
+  if (typeof body.audience === 'string' && BANNER_AUDIENCES.includes(body.audience)) b.audience = body.audience;
+  if (typeof body.linkType === 'string' && BANNER_LINK_TYPES.includes(body.linkType)) b.linkType = body.linkType;
+  if (typeof body.linkValue === 'string') b.linkValue = body.linkValue.trim();
+  if (typeof body.active === 'boolean') b.active = body.active;
+  if (typeof body.priority === 'number' && Number.isFinite(body.priority)) b.priority = body.priority;
+  // startAt/endAt chegam como string de <input type="datetime-local">, ou
+  // null/'' pra "sem data definida" (agendamento é opcional em cada ponta).
+  if ('startAt' in body) b.startAt = body.startAt ? new Date(body.startAt).getTime() : null;
+  if ('endAt' in body) b.endAt = body.endAt ? new Date(body.endAt).getTime() : null;
+  return b;
+}
+
+app.get('/api/admin/banners', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.banners).sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  res.json(list);
+});
+
+app.post('/api/admin/banners', requireAuth('admin'), (req, res) => {
+  if (!req.body || !req.body.imageUrl || !String(req.body.imageUrl).trim()) {
+    return res.status(400).json({ error: 'A imagem do banner é obrigatória' });
+  }
+  const db = loadDB();
+  const id = shortId('banner');
+  const banner = sanitizeBannerInput(req.body, {
+    id,
+    imageUrl: '',
+    audience: 'both',
+    linkType: 'none',
+    linkValue: '',
+    active: true,
+    priority: 0,
+    startAt: null,
+    endAt: null,
+    createdAt: Date.now()
+  });
+  db.banners[id] = banner;
+  saveDB(db);
+  res.json(banner);
+});
+
+app.patch('/api/admin/banners/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const existing = db.banners[req.params.id];
+  if (!existing) return res.status(404).json({ error: 'Banner não encontrado' });
+  const updated = sanitizeBannerInput(req.body, existing);
+  db.banners[req.params.id] = updated;
+  saveDB(db);
+  res.json(updated);
+});
+
+app.delete('/api/admin/banners/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  if (!db.banners[req.params.id]) return res.status(404).json({ error: 'Banner não encontrado' });
+  delete db.banners[req.params.id];
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Rota pública (motoboy/comércio logados) — só devolve os banners que
+// estão de fato valendo AGORA para quem está pedindo, já filtrados por
+// público-alvo, ativo/inativo, e janela de data. O app escolhe qual
+// mostrar (1 por sessão, alternando) a partir dessa lista.
+app.get('/api/banners', requireAuth('motoboy', 'business'), (req, res) => {
+  const db = loadDB();
+  const now = Date.now();
+  const list = Object.values(db.banners)
+    .filter((b) => b.active)
+    .filter((b) => b.audience === 'both' || b.audience === req.authType)
+    .filter((b) => !b.startAt || b.startAt <= now)
+    .filter((b) => !b.endAt || b.endAt >= now)
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  res.json(list);
+});
+
+
+
 
 // ---------------------------------------------------------------
 // Businesses
@@ -1113,11 +1200,22 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
   }
 
   // Live location ping — the app sends this every so often while the
-  // motoboy is online, purely so the offer queue can rank by real
-  // distance to the pickup address (see buildOfferQueue). Not used for
-  // anything else, and never required to keep the account online.
-  if (typeof req.body.lat === 'number' && typeof req.body.lng === 'number') {
-    m.lastLocation = { lat: req.body.lat, lng: req.body.lng, updatedAt: Date.now() };
+  // motoboy is online, so the offer queue can rank by real distance to
+  // the pickup address (see buildOfferQueue), and so the admin panel can
+  // show a live pin. Not required to keep the account online.
+  // "acc" (accuracy, in meters, as reported by the device) travels with
+  // it now too, so bad fixes can be told apart from good ones — both here
+  // and by whoever renders the admin map.
+  if (
+    typeof req.body.lat === 'number' && Number.isFinite(req.body.lat) && Math.abs(req.body.lat) <= 90 &&
+    typeof req.body.lng === 'number' && Number.isFinite(req.body.lng) && Math.abs(req.body.lng) <= 180
+  ) {
+    m.lastLocation = {
+      lat: req.body.lat,
+      lng: req.body.lng,
+      acc: (typeof req.body.acc === 'number' && Number.isFinite(req.body.acc)) ? Math.round(req.body.acc) : null,
+      updatedAt: Date.now()
+    };
   }
 
   if (typeof req.body.name === 'string' && req.body.name.trim()) m.name = req.body.name.trim();

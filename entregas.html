@@ -1033,6 +1033,28 @@
     .topbar, .no-print{ display:none !important; }
     body{ background:#fff; }
   }
+
+  .banner-modal-overlay{
+    position:fixed; inset:0; z-index:200;
+    background:rgba(0,0,0,0.78);
+    display:flex; align-items:center; justify-content:center;
+    padding:20px;
+  }
+  .banner-modal-box{
+    position:relative;
+    max-width:440px; width:100%;
+    border-radius:18px; overflow:hidden;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
+  .banner-modal-image{
+    display:block; width:100%; height:auto; cursor:pointer;
+  }
+  .banner-modal-close{
+    position:absolute; top:10px; right:10px; z-index:1;
+    width:32px; height:32px; border-radius:50%;
+    background:rgba(0,0,0,0.55); color:#fff; border:none;
+    font-size:16px; cursor:pointer; line-height:1;
+  }
 </style>
 </head>
 <body>
@@ -1371,6 +1393,7 @@
     historyStatusFilter: 'todas', // todas | finalizadas | canceladas | andamento
     soundPref: null, // {type:'preset', preset:'padrao'} or {type:'custom', dataUri, fileName} — motoboy's own device only
     showSoundPicker: false,
+    activeBanner: null, // the one full-screen promo banner chosen for this app open, or null
     toast: null
   };
 
@@ -1419,6 +1442,7 @@
         await refreshRecentAddresses();
         startPolling();
         render();
+        checkBanners();
         return;
       }
       // token was rejected — clear it and fall through to a fresh welcome screen
@@ -1559,6 +1583,34 @@
     state.recentAddresses = Array.isArray(list) ? list : [];
   }
 
+  // ---------- pop-up banners (full-screen promo, one per app open) ----------
+  // The admin creates/edits these from the admin panel — nothing here is
+  // hardcoded. The server already filters by público-alvo/ativo/datas;
+  // this just picks WHICH ONE of the eligible banners to show this time,
+  // rotating through them across app opens instead of always the same one.
+  async function checkBanners(){
+    if(!state.role) return;
+    const list = await apiGet('/api/banners');
+    if(!Array.isArray(list) || !list.length) return;
+    const seenKey = 'banner-rotation-index';
+    let idx = (await getJSON(seenKey, false));
+    idx = (typeof idx === 'number' && idx >= 0) ? idx : 0;
+    const banner = list[idx % list.length];
+    await setJSON(seenKey, idx + 1, false);
+    state.activeBanner = banner;
+    render();
+  }
+
+  function openBannerLink(b){
+    if(!b || b.linkType==='none' || !b.linkValue) return;
+    if(b.linkType==='external'){
+      window.open(b.linkValue, '_blank');
+    } else {
+      // 'internal' — a relative path within the app's own site
+      window.location.href = b.linkValue;
+    }
+  }
+
   async function afterAuthSuccess(role, token, profile){
     state.authToken = token;
     await setJSON('auth-token', token, false);
@@ -1574,6 +1626,7 @@
     await refreshRecentAddresses();
     startPolling();
     render();
+    checkBanners();
   }
 
   async function submitBusinessRegister(data){
@@ -1710,6 +1763,7 @@
     showToast(labels[newStatus]);
     if(newStatus === 'online' && typeof pingMotoboyLocationIfOnline === 'function') pingMotoboyLocationIfOnline();
     if(newStatus === 'online') ensurePushSubscription('motoboy');
+    if(newStatus === 'online') acquireWakeLock(); else releaseWakeLock();
   }
 
   // ---------- Localização exata do comércio (mapa com pino arrastável) ----------
@@ -2378,6 +2432,10 @@
       spacer.style.height = '54px';
       wrap.insertBefore(spacer, wrap.firstChild);
       root.appendChild(renderIncomingAlertBanner(state.incomingAlert));
+    }
+
+    if(state.activeBanner){
+      root.appendChild(renderBannerModal(state.activeBanner));
     }
 
     if(state.modal==='new-order'){
@@ -3343,6 +3401,22 @@
     return el;
   }
 
+  // Full-screen promo pop-up — single image, created/edited entirely from
+  // the admin panel. Tapping the image follows the banner's own link (if
+  // any); the X just dismisses it for this app open.
+  function renderBannerModal(b){
+    const wrap = document.createElement('div');
+    wrap.className = 'banner-modal-overlay';
+    wrap.id = 'banner-modal-overlay';
+    wrap.innerHTML = `
+      <div class="banner-modal-box">
+        <button class="banner-modal-close" id="banner-modal-close">✕</button>
+        <img class="banner-modal-image" id="banner-modal-image" src="${esc(b.imageUrl)}" alt="">
+      </div>
+    `;
+    return wrap;
+  }
+
   function renderIncomingAlertBanner(o){
     const wrap = document.createElement('div');
     wrap.className = 'incoming-alert';
@@ -3840,6 +3914,11 @@
     const alertDismiss = $('#incoming-alert-dismiss');
     if(alertDismiss) alertDismiss.onclick = ()=>setState({incomingAlert:null});
 
+    const bannerClose = $('#banner-modal-close');
+    if(bannerClose) bannerClose.onclick = (e)=>{ e.stopPropagation(); setState({activeBanner:null}); };
+    const bannerImage = $('#banner-modal-image');
+    if(bannerImage) bannerImage.onclick = ()=>{ openBannerLink(state.activeBanner); setState({activeBanner:null}); };
+
     root.querySelectorAll('[data-accept]').forEach(elm=>{
       elm.onclick = ()=>acceptOrder(elm.getAttribute('data-accept'));
     });
@@ -4086,27 +4165,76 @@
   }, 15000);
 
   // ---------- background location ping (online motoboys only) ----------
-  // Separate from the arrival-lock GPS watch above: this one just lets the
+  // Separate from the arrival-lock GPS watch above: this one lets the
   // server know roughly where each online motoboy is, so a new ride can be
-  // offered to whoever's actually closest to the pickup address instead of
-  // just whoever has done the fewest rides. A single fresh fix every ~25s
-  // is plenty for that — no need for a continuous high-accuracy watch.
+  // offered to whoever's actually closest to the pickup address, and so
+  // the admin panel can show a live pin. Still a single fresh fix per
+  // round (not a continuous watch) — enableHighAccuracy stays off on
+  // purpose, that's a battery/GPS-warm-up cost with no upside for a
+  // "roughly where are they" ping. What we improve here instead is
+  // rejecting bad readings rather than forwarding every single one blindly:
+  //
+  // 1) Readings worse than PING_MAX_ACCEPTABLE_ACCURACY_M are dropped —
+  //    they're too coarse (cell-tower/wifi guesses) to be worth showing.
+  // 2) A jump that implies an impossible speed since the last accepted fix
+  //    is dropped too (classic GPS glitch/teleport). Elapsed time is part
+  //    of that math, so a genuinely large gap (e.g. the app was
+  //    backgrounded for a while) doesn't get flagged — only a jump that's
+  //    too big for the time that actually passed.
+  const PING_MAX_ACCEPTABLE_ACCURACY_M = 300;
+  const PING_MAX_PLAUSIBLE_SPEED_MS = 41.7; // ~150 km/h, generous ceiling for a moto
+  let lastAcceptedPing = null; // {lat, lng, ts}
+
   function pingMotoboyLocationIfOnline(){
     if(state.role !== 'motoboy' || motoboyStatus() !== 'online') return;
     if(!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition(
       pos => {
-        apiPatch('/api/motoboys/'+state.myId, {
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude
-        }).catch(()=>{});
+        const acc = Math.round(pos.coords.accuracy);
+        if(acc > PING_MAX_ACCEPTABLE_ACCURACY_M) return; // too imprecise, skip this round
+
+        const now = Date.now();
+        const lat = pos.coords.latitude, lng = pos.coords.longitude;
+        if(lastAcceptedPing){
+          const elapsedS = Math.max(1, (now - lastAcceptedPing.ts) / 1000);
+          const impliedSpeed = haversineMeters(lastAcceptedPing.lat, lastAcceptedPing.lng, lat, lng) / elapsedS;
+          if(impliedSpeed > PING_MAX_PLAUSIBLE_SPEED_MS) return; // likely a glitch, skip and try again next round
+        }
+        lastAcceptedPing = {lat, lng, ts: now};
+        apiPatch('/api/motoboys/'+state.myId, {lat, lng, acc}).catch(()=>{});
       },
       ()=>{ /* permission denied or unavailable — silently skip this round */ },
-      {enableHighAccuracy:false, maximumAge:20000, timeout:10000}
+      {enableHighAccuracy:false, maximumAge:15000, timeout:10000}
     );
   }
-  setInterval(pingMotoboyLocationIfOnline, 25000);
+  setInterval(pingMotoboyLocationIfOnline, 20000);
   pingMotoboyLocationIfOnline(); // also fire once right away after load/login
+
+  // ---------- keep the screen awake while online ----------
+  // The background ping above only runs while the browser considers this
+  // tab/app "active" — the moment the screen locks, Android suspends it.
+  // The Wake Lock API can't stop the motoboy from switching to another
+  // app (Waze/Maps), but it does stop the single biggest accidental cause
+  // of gaps: the screen dimming and locking on its own while the app is
+  // still the one in front.
+  let wakeLock = null;
+  async function acquireWakeLock(){
+    try{
+      if('wakeLock' in navigator){
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    }catch(e){ /* not available on this device/browser — ping just runs less reliably */ }
+  }
+  function releaseWakeLock(){
+    if(wakeLock){ try{ wakeLock.release(); }catch(e){} wakeLock = null; }
+  }
+  document.addEventListener('visibilitychange', () => {
+    // The lock is auto-released whenever the tab is hidden; re-request it
+    // when the motoboy comes back while still online.
+    if(document.visibilityState === 'visible' && state.role === 'motoboy' && motoboyStatus() === 'online'){
+      acquireWakeLock();
+    }
+  });
 })();
 </script>
 </body>
