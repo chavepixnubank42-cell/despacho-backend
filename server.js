@@ -3,15 +3,26 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
+const webpush = require('web-push');
 const { loadDB, saveDB } = require('./db');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
+const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega', 'retornando', 'no_local_retorno'];
+// Once the motoboy has departed the pickup with the package in hand
+// ('em_entrega' onward), canceling no longer makes sense for either side —
+// the package is already physically out for delivery. Before that point
+// (still heading to or waiting at the pickup) canceling is still fine.
+const CANCELABLE_STATUSES = ['pendente', 'aceito', 'no_local_retirada'];
 const OFFER_TIMEOUT_MS = 30 * 1000; // seconds a motoboy has to accept/decline
 const ARRIVAL_RADIUS_METERS = 150; // how close the motoboy must be to confirm arrival
+// GPS accuracy varies a lot by device (a laptop or a phone with a weak
+// signal can easily report 200-400m of margin). We let the arrival check
+// stretch by up to this much extra, on top of ARRIVAL_RADIUS_METERS, to
+// match the motoboy's own reported accuracy — see arrivalTransition below.
+const MAX_ACCURACY_ALLOWANCE_METERS = 350;
 const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
 
 // ---------------------------------------------------------------
@@ -22,6 +33,79 @@ const shortId = (prefix) => prefix + '_' + uuidv4().slice(0, 8);
 const mpToken = process.env.MERCADOPAGO_ACCESS_TOKEN || '';
 const mpClient = mpToken ? new MercadoPagoConfig({ accessToken: mpToken, options: { timeout: 8000 } }) : null;
 const mpPayment = mpClient ? new Payment(mpClient) : null;
+
+// ---------------------------------------------------------------
+// Push notifications (Web Push / VAPID) — set VAPID_PUBLIC_KEY and
+// VAPID_PRIVATE_KEY as environment variables (Railway: Variables tab).
+// Without them, push is silently disabled and the app keeps working
+// exactly as before (motoboys just rely on the in-app polling).
+// ---------------------------------------------------------------
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const pushEnabled = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+if (pushEnabled) {
+  webpush.setVapidDetails(
+    'mailto:' + (process.env.VAPID_CONTACT_EMAIL || 'contato@chegoja.app'),
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — notificações push desativadas.');
+}
+
+// Sends a push notification to every device subscribed for a given
+// business or motoboy record. Fire-and-forget on purpose — we never want
+// a slow/failed push to delay the API response the caller is waiting on.
+// A subscription the browser has revoked (410/404) is removed so we stop
+// wasting calls on it.
+function notifyEntity(collectionName, id, payload) {
+  if (!pushEnabled) return;
+  const db = loadDB();
+  const entity = db[collectionName][id];
+  if (!entity || !Array.isArray(entity.pushSubscriptions) || entity.pushSubscriptions.length === 0) return;
+  const body = JSON.stringify(payload);
+  let removedAny = false;
+  Promise.all(
+    entity.pushSubscriptions.map((sub) =>
+      webpush.sendNotification(sub, body).catch((err) => {
+        if (err && (err.statusCode === 410 || err.statusCode === 404)) {
+          entity.pushSubscriptions = entity.pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
+          removedAny = true;
+        } else {
+          console.error('Falha ao enviar push (' + collectionName + ')', id, err && err.message);
+        }
+      })
+    )
+  ).then(() => {
+    if (removedAny) {
+      const freshDb = loadDB(); // re-read: time has passed since we started
+      const freshEntity = freshDb[collectionName][id];
+      if (freshEntity) {
+        freshEntity.pushSubscriptions = entity.pushSubscriptions;
+        saveDB(freshDb);
+      }
+    }
+  });
+}
+function notifyMotoboy(motoboyId, payload) {
+  notifyEntity('motoboys', motoboyId, payload);
+}
+function notifyBusiness(businessId, payload) {
+  notifyEntity('businesses', businessId, payload);
+}
+
+// Notifies whoever is currently at the front of an order's offer queue —
+// called both when an order is first created and every time advanceOffer()
+// moves the offer to the next motoboy in line.
+function notifyOfferedMotoboy(db, o) {
+  if (!o.offerQueue || o.offerIndex >= o.offerQueue.length) return;
+  const motoboyId = o.offerQueue[o.offerIndex];
+  notifyMotoboy(motoboyId, {
+    title: '📦 Nova corrida disponível',
+    body: o.businessName + ' — R$ ' + Number(o.value || 0).toFixed(2),
+    data: { type: 'new-offer', orderId: o.id }
+  });
+}
 
 // ---------------------------------------------------------------
 // Geocoding (Nominatim/OpenStreetMap) — turns an address into lat/lng so
@@ -49,9 +133,9 @@ async function geocodeAddress(address) {
   if (db.geocodeCache[key] !== undefined) return db.geocodeCache[key];
 
   try {
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(address);
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=' + encodeURIComponent(address);
     const res = await throttledFetch(url, {
-      headers: { 'User-Agent': 'DespachoApp/1.0 (app de despacho de entregas por moto)' }
+      headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
     });
     const data = await res.json();
     const coords = data && data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null;
@@ -66,6 +150,52 @@ async function geocodeAddress(address) {
   }
 }
 
+// Like geocodeAddress, but for the interactive search box on the map pin
+// picker: returns a handful of candidate matches (with display names) so
+// the person can pick the right one and then fine-tune it by dragging the
+// pin themselves — this is a starting point for the map, not cached,
+// since it's a one-off interactive lookup rather than something reused
+// every time an order is created.
+//
+// `addressdetails=1` lets us tell whether Nominatim actually matched a
+// house number or only snapped to the street itself — Brazilian OSM data
+// often lacks per-building numbers on smaller streets, in which case the
+// pin lands at roughly the middle of the street instead of the right
+// door. `hasHouseNumber` on each result lets the front-end warn the
+// person to double-check/drag the pin in that case, instead of silently
+// trusting an approximate match as if it were exact.
+async function geocodeSearch(query) {
+  if (!query || !query.trim()) return [];
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&countrycodes=br&q=' + encodeURIComponent(query);
+  const res = await throttledFetch(url, {
+    headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
+  });
+  const data = await res.json();
+  return (Array.isArray(data) ? data : []).map((r) => ({
+    label: r.display_name,
+    lat: parseFloat(r.lat),
+    lng: parseFloat(r.lon),
+    hasHouseNumber: !!(r.address && r.address.house_number)
+  }));
+}
+
+// Coordinate -> address, for the "drag the map, pin stays fixed in the
+// center" picker (same interaction Uber/iFood use): as the person pans the
+// map, the front-end asks "what's under the pin now?" so it can show the
+// street name live, instead of leaving them staring at a blank map.
+async function reverseGeocode(lat, lng) {
+  const url = 'https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&lat=' + lat + '&lon=' + lng;
+  const res = await throttledFetch(url, {
+    headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
+  });
+  const data = await res.json();
+  if (!data || data.error) return { label: null, hasHouseNumber: false };
+  return {
+    label: data.display_name || null,
+    hasHouseNumber: !!(data.address && data.address.house_number)
+  };
+}
+
 function distanceMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -76,18 +206,84 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Soma valores em dinheiro pelo total em CENTAVOS (arredondando cada parcela
+// antes de somar), não em ponto flutuante puro — "0.1 + 0.2" no JavaScript dá
+// 0.30000000000000004, e somar várias entregas assim pode fazer o total
+// aparecer "faltando 1 centavo" mesmo com cada valor individual correto.
+function sumMoney(list, getter) {
+  const cents = list.reduce((s, item) => s + Math.round(((getter ? getter(item) : item) || 0) * 100), 0);
+  return cents / 100;
+}
+
+// ---------------------------------------------------------------
+// Free-credits promo — an admin can waive the per-ride credit charge for
+// a business, either indefinitely or until a given date. Computed fresh
+// every time (never trusted from a stale flag) so an expired promo stops
+// applying automatically, with no cron-style sweep needed to turn it off.
+// ---------------------------------------------------------------
+function hasFreeCredits(b) {
+  if (!b || !b.freeCredits || !b.freeCredits.active) return false;
+  if (b.freeCredits.until && Date.now() > b.freeCredits.until) return false;
+  return true;
+}
+
+// Turns a promo on/off for one business and logs it to freeCreditsHistory —
+// since this waives real charges, every activation/deactivation is recorded
+// with who (always 'admin' here) and when, so there's never a mystery about
+// why a business wasn't billed for a stretch of rides.
+function applyFreeCredits(b, { active, until }) {
+  const isActive = !!active;
+  const untilTs = until ? Number(until) : null;
+  b.freeCredits = { active: isActive, until: Number.isFinite(untilTs) ? untilTs : null };
+  if (!Array.isArray(b.freeCreditsHistory)) b.freeCreditsHistory = [];
+  b.freeCreditsHistory.unshift({
+    action: isActive ? 'ativado' : 'desativado',
+    until: b.freeCredits.until,
+    at: Date.now()
+  });
+  if (b.freeCreditsHistory.length > 20) b.freeCreditsHistory.length = 20; // recent history only
+}
+
+// ---------------------------------------------------------------
+// In-app notices — a lightweight inbox so an admin broadcast (promo or
+// maintenance heads-up) reaches every business/motoboy even without push
+// permission granted. Push is still attempted too (see notifyEntity) for
+// whoever did opt in; this is the fallback that reaches everyone else.
+// ---------------------------------------------------------------
+const NOTICE_CAP = 30; // keep each inbox small — this is a feed, not an archive
+function pushNotice(db, collectionName, id, { title, body, promo }) {
+  const entity = db[collectionName][id];
+  if (!entity) return;
+  if (!Array.isArray(entity.notices)) entity.notices = [];
+  entity.notices.unshift({
+    id: shortId('notice'),
+    title,
+    body,
+    promo: !!promo,
+    read: false,
+    createdAt: Date.now()
+  });
+  if (entity.notices.length > NOTICE_CAP) entity.notices.length = NOTICE_CAP;
+  notifyEntity(collectionName, id, { title, body, data: { type: 'admin-message' } });
+}
+
 // ---------------------------------------------------------------
 // Auth — hashed passwords (bcryptjs) + server-side session tokens.
 // Never store or return a plain-text password; never return passwordHash.
 // ---------------------------------------------------------------
 function sanitizeBusiness(b) {
   if (!b) return b;
-  const { passwordHash, ...rest } = b;
+  const { passwordHash, pushSubscriptions, ...rest } = b;
+  rest.freeCreditsEffective = hasFreeCredits(b); // computed, not the raw stored flag — see hasFreeCredits
   return rest;
 }
 function sanitizeMotoboy(m) {
   if (!m) return m;
-  const { passwordHash, ...rest } = m;
+  const { passwordHash, pushSubscriptions, ...rest } = m;
+  // Always expose the EFFECTIVE status (motoboyStatus applies the forced-
+  // pause override) rather than the raw stored field, so the app can't show
+  // "online" while a timeout penalty is actually keeping them paused.
+  rest.status = motoboyStatus(m);
   return rest;
 }
 function makeToken() {
@@ -112,12 +308,514 @@ function requireAuth(...allowedTypes) {
     if (!session || (allowedTypes.length && !allowedTypes.includes(session.type))) {
       return res.status(401).json({ error: 'Sessão inválida — faça login novamente' });
     }
+    // A business/motoboy blocked by the admin is locked out immediately,
+    // even with an already-open session — not just on their next login.
+    if (session.type === 'business' && db.businesses[session.id] && db.businesses[session.id].blocked) {
+      return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+    }
+    if (session.type === 'motoboy' && db.motoboys[session.id] && db.motoboys[session.id].blocked) {
+      return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+    }
     req.authType = session.type;
     req.authId = session.id;
     next();
   };
 }
 const PASSWORD_MIN_LENGTH = 6;
+
+// ---------------------------------------------------------------
+// Admin — a single owner account, not a normal signup. The password
+// lives in an environment variable (ADMIN_PASSWORD on Railway) instead of
+// the database, so there's no registration flow to secure or lose access
+// to. Anyone with that password gets a session of type 'admin', same
+// mechanism as business/motoboy sessions (requireAuth('admin') below).
+app.post('/api/admin/login', (req, res) => {
+  const { password } = req.body || {};
+  const expected = process.env.ADMIN_PASSWORD;
+  if (!expected) {
+    return res.status(503).json({ error: 'Painel administrativo ainda não configurado neste servidor (falta ADMIN_PASSWORD).' });
+  }
+  if (!password || password !== expected) {
+    return res.status(401).json({ error: 'Senha incorreta' });
+  }
+  const db = loadDB();
+  const token = createSession(db, 'admin', 'admin');
+  saveDB(db);
+  res.json({ token });
+});
+
+// Whole-picture views — every business, every motoboy, every order, plus a
+// rollup summary. All read-only; the platform-owner UI is built on top of
+// these on the front-end.
+app.get('/api/admin/businesses', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.businesses).map((b) => {
+    const ridesCount = Object.values(db.orders).filter((o) => o.businessId === b.id && o.status === 'entregue').length;
+    return Object.assign(sanitizeBusiness(b), { ridesCount });
+  });
+  res.json(list);
+});
+
+app.get('/api/admin/motoboys', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.motoboys).map((m) => {
+    const ridesCount = Object.values(db.orders).filter((o) => o.motoboyId === m.id && o.status === 'entregue').length;
+    return Object.assign(sanitizeMotoboy(m), { ridesCount, rating: ratingSummary(db, 'motoboy', m.id) });
+  });
+  res.json(list);
+});
+
+app.get('/api/admin/orders', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  let list = Object.values(db.orders);
+  if (req.query.status) list = list.filter((o) => o.status === req.query.status);
+  list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  res.json(list.slice(0, 500)); // plenty for a dashboard; avoids ever shipping an unbounded list
+});
+
+// Corridas com um chamado de suporte em aberto (motoboy reportou algo no
+// meio da entrega) — a tela de Suporte do admin escuta isso pra saber o
+// que ainda precisa de uma decisão (encerrar ou devolver pro comércio).
+app.get('/api/admin/support-tickets', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.orders)
+    .filter((o) => o.support && (req.query.status ? o.support.status === req.query.status : true))
+    .sort((a, b) => (b.support.reportedAt || 0) - (a.support.reportedAt || 0));
+  res.json(list.slice(0, 300));
+});
+
+// "Encerrar corrida" — o admin fecha a corrida quando o problema já foi
+// resolvido (por telefone, por exemplo) e não faz sentido segurar ela em
+// aberto. Isso marca como CONCLUÍDA (igual o motoboy tivesse confirmado a
+// entrega normalmente) — não como cancelada, pra não pesar contra o
+// motoboy nem no histórico dele nem nos ganhos. Funciona a partir de
+// qualquer status não-terminal, diferente do /cancel normal que só aceita
+// até 'no_local_retirada'.
+app.post('/api/admin/orders/:id/end', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.status === 'entregue' || o.status === 'cancelado') {
+    return res.status(409).json({ error: 'Essa corrida já está finalizada.' });
+  }
+  o.status = 'entregue';
+  o.deliveredAt = Date.now();
+  o.closedBy = 'admin'; // distingue de uma entrega confirmada pelo próprio motoboy, sem mudar como ela aparece pra ele
+  o.closeReason = (req.body && req.body.note) || 'Encerrada pelo suporte';
+  if (o.support && o.support.status === 'aberto') {
+    o.support.status = 'resolvido';
+    o.support.resolvedAt = Date.now();
+    o.support.resolvedAction = 'encerrada';
+    o.support.resolvedNote = (req.body && req.body.note) || null;
+  }
+  if (o.motoboyId) {
+    pushNotice(db, 'motoboys', o.motoboyId, {
+      title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' encerrada pelo suporte',
+      body: 'Nosso suporte encerrou essa corrida como concluída. Pode deixar o pedido de lado — se tiver dúvida, chame a gente.',
+      promo: false
+    });
+  }
+  saveDB(db);
+  res.json(o);
+});
+
+// "Voltar para o comércio" — o admin avança a MESMA corrida, com o MESMO
+// motoboy, direto pro estado "retornando" — como se estivesse mexendo no
+// painel do próprio motoboy e apertasse o botão de voltar depois de
+// entregar (mesmo fluxo de "ida e volta" que já existe). Não passa pra
+// outro motoboy, e não fecha a corrida sozinho: ele ainda precisa chegar
+// de volta e confirmar normalmente pra concluir. Também liga o campo
+// roundTrip nessa corrida (mesmo que ela não tenha começado assim),
+// porque é esse campo que libera as etapas de retorno no app dele.
+app.post('/api/admin/orders/:id/return-to-business', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (!o.motoboyId) return res.status(409).json({ error: 'Essa corrida não está com um motoboy no momento.' });
+  const FORCEABLE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
+  if (!FORCEABLE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Essa corrida já está voltando ou já foi finalizada.' });
+  }
+  o.roundTrip = true;
+  o.status = 'retornando';
+  o.returnDepartedAt = Date.now();
+  if (o.support && o.support.status === 'aberto') {
+    o.support.status = 'resolvido';
+    o.support.resolvedAt = Date.now();
+    o.support.resolvedAction = 'retorno_forcado';
+    o.support.resolvedNote = (req.body && req.body.note) || null;
+  }
+  pushNotice(db, 'motoboys', o.motoboyId, {
+    title: 'Corrida #' + o.id.slice(-6).toUpperCase() + ' — volte para o comércio',
+    body: 'Nosso suporte pediu pra você voltar com o pedido/pagamento pro comércio agora. Quando chegar, confirme normalmente pra concluir a corrida.',
+    promo: false
+  });
+  saveDB(db);
+  res.json(o);
+});
+
+app.get('/api/admin/summary', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const orders = Object.values(db.orders);
+  const delivered = orders.filter((o) => o.status === 'entregue');
+  const active = orders.filter((o) => ACTIVE_STATUSES.includes(o.status));
+  const businesses = Object.values(db.businesses);
+  const motoboys = Object.values(db.motoboys);
+  res.json({
+    totalBusinesses: businesses.length,
+    totalMotoboys: motoboys.length,
+    motoboysOnline: motoboys.filter((m) => motoboyStatus(m) === 'online').length,
+    motoboysPendingApproval: motoboys.filter((m) => m.approved === false).length,
+    totalOrders: orders.length,
+    deliveredOrders: delivered.length,
+    activeOrders: active.length,
+    canceledOrders: orders.filter((o) => o.status === 'cancelado').length,
+    // Platform revenue so far: CREDIT_COST_PER_RIDE per completed delivery.
+    platformRevenue: delivered.length * CREDIT_COST_PER_RIDE,
+    // Total paid out to motoboys so far (the `value` field on each order is
+    // what the motoboy earns for it — set when the business creates the ride).
+    totalPaidToMotoboys: sumMoney(delivered, (o) => o.value),
+    creditsInCirculation: sumMoney(businesses, (b) => b.credits)
+  });
+});
+
+// Report buckets for the admin dashboard's chart. `period` controls both
+// the range covered and how it's sliced:
+//   'hoje'   -> today, one bucket per hour (00h..current hour)
+//   'semana' -> last 7 days, one bucket per day
+//   'mes'    -> last 30 days, one bucket per day
+// Each bucket reports deliveries, cancellations, platform revenue (an
+// automatic CREDIT_COST_PER_RIDE per delivery) and total paid to motoboys
+// (the sum of each delivered ride's own `value`) — everything the chart
+// and the totals row need, computed once here instead of on the front-end.
+app.get('/api/admin/reports', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const period = ['hoje', 'semana', 'mes'].includes(req.query.period) ? req.query.period : 'semana';
+  const orders = Object.values(db.orders);
+  const now = new Date();
+
+  let buckets; // [{label, start, end}]
+  if (period === 'hoje') {
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    buckets = [];
+    for (let h = 0; h <= now.getHours(); h++) {
+      const start = new Date(startOfDay).setHours(h, 0, 0, 0);
+      const end = new Date(startOfDay).setHours(h, 59, 59, 999);
+      buckets.push({ label: String(h).padStart(2, '0') + 'h', start, end });
+    }
+  } else {
+    const days = period === 'semana' ? 7 : 30;
+    buckets = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const start = new Date(day).setHours(0, 0, 0, 0);
+      const end = new Date(day).setHours(23, 59, 59, 999);
+      buckets.push({ label: String(day.getDate()).padStart(2, '0') + '/' + String(day.getMonth() + 1).padStart(2, '0'), start, end });
+    }
+  }
+
+  const series = buckets.map((b) => {
+    const delivered = orders.filter((o) => o.status === 'entregue' && o.deliveredAt >= b.start && o.deliveredAt <= b.end);
+    const canceled = orders.filter((o) => o.status === 'cancelado' && o.cancelledAt >= b.start && o.cancelledAt <= b.end);
+    return {
+      label: b.label,
+      delivered: delivered.length,
+      canceled: canceled.length,
+      revenue: delivered.length * CREDIT_COST_PER_RIDE,
+      paidToMotoboys: sumMoney(delivered, (o) => o.value)
+    };
+  });
+
+  const totals = {
+    delivered: series.reduce((s, x) => s + x.delivered, 0),
+    canceled: series.reduce((s, x) => s + x.canceled, 0),
+    revenue: sumMoney(series, (x) => x.revenue),
+    paidToMotoboys: sumMoney(series, (x) => x.paidToMotoboys)
+  };
+
+  res.json({ period, series, totals });
+});
+
+// Block / unblock — a blocked business can't log in or create new rides; a
+// blocked motoboy can't log in and is treated as offline for new offers.
+// Existing in-progress rides are left alone (finish naturally) rather than
+// yanked out from under whoever's mid-delivery.
+app.patch('/api/admin/businesses/:id/block', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  b.blocked = !!req.body.blocked;
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+app.patch('/api/admin/motoboys/:id/block', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.blocked = !!req.body.blocked;
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
+// Approve (or reject/undo) a motoboy's registration. A rejected motoboy
+// simply stays approved:false — they keep their account and can be
+// approved later if it was a mistake, rather than being deleted outright.
+app.patch('/api/admin/motoboys/:id/approve', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.approved = !!req.body.approved;
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
+// ---------------------------------------------------------------
+// Free-credits promo — waives CREDIT_COST_PER_RIDE for this business's
+// rides while active. `until` is an optional ms timestamp; leave it out
+// (or null) for a promo that stays on until an admin turns it off by hand.
+// Only makes sense for comércios (they're who spends credits per ride).
+// ---------------------------------------------------------------
+app.patch('/api/admin/businesses/:id/free-credits', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  applyFreeCredits(b, req.body || {});
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+// Same action across several businesses at once ("selecionar todos" no
+// painel) — one history entry per business, same as a individual toggle.
+app.post('/api/admin/businesses/free-credits-bulk', requireAuth('admin'), (req, res) => {
+  const { ids, active, until } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'Selecione ao menos um comércio' });
+  const db = loadDB();
+  let count = 0;
+  ids.forEach((id) => {
+    const b = db.businesses[id];
+    if (!b) return;
+    applyFreeCredits(b, { active, until });
+    count++;
+  });
+  saveDB(db);
+  res.json({ ok: true, count });
+});
+
+// ---------------------------------------------------------------
+// Admin broadcast messages — individual or coletivo, para comércios ou
+// motoboys. Mensagens promocionais só fazem sentido para comércios (são
+// quem gasta crédito); motoboys ainda podem receber avisos operacionais
+// (manutenção do app etc.) pelo mesmo mecanismo, só que sem o tipo promoção.
+// ---------------------------------------------------------------
+app.post('/api/admin/messages', requireAuth('admin'), (req, res) => {
+  const { audience, type, title, body, ids } = req.body || {};
+  if (audience !== 'business' && audience !== 'motoboy') {
+    return res.status(400).json({ error: 'Público inválido' });
+  }
+  const msgType = type === 'promocao' ? 'promocao' : 'aviso';
+  if (audience === 'motoboy' && msgType === 'promocao') {
+    return res.status(400).json({ error: 'Mensagens promocionais são só para comércios' });
+  }
+  if (!title || !title.trim() || !body || !body.trim()) {
+    return res.status(400).json({ error: 'Preencha o título e a mensagem' });
+  }
+  const db = loadDB();
+  const collectionName = audience === 'business' ? 'businesses' : 'motoboys';
+  const allIds = Object.keys(db[collectionName]);
+  const targetIds = Array.isArray(ids) && ids.length > 0 ? ids.filter((id) => db[collectionName][id]) : allIds;
+  if (targetIds.length === 0) return res.status(400).json({ error: 'Nenhum destinatário encontrado' });
+
+  targetIds.forEach((id) => {
+    pushNotice(db, collectionName, id, { title: title.trim(), body: body.trim(), promo: msgType === 'promocao' });
+  });
+
+  db.messages = db.messages || {};
+  const message = {
+    id: shortId('msg'),
+    audience,
+    type: msgType,
+    title: title.trim(),
+    body: body.trim(),
+    targetCount: targetIds.length,
+    allAudience: !(Array.isArray(ids) && ids.length > 0),
+    createdAt: Date.now()
+  };
+  db.messages[message.id] = message;
+  saveDB(db);
+  res.json({ ok: true, message });
+});
+
+// History of everything already sent — so an admin can check "já avisei
+// isso?" before firing off the same promo twice.
+app.get('/api/admin/messages', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.messages || {});
+  list.sort((a, b) => b.createdAt - a.createdAt);
+  res.json(list.slice(0, 200));
+});
+
+// Permanently removes a business. Order history keeps working fine
+// afterwards — businessName/deliveryAddress etc. are snapshotted onto each
+// order at creation time, not looked up live — but we refuse to delete
+// while the business has an order still in flight, since that order's
+// businessId would otherwise point at nothing.
+app.delete('/api/admin/businesses/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  const hasActiveOrder = Object.values(db.orders).some(
+    (o) => o.businessId === b.id && (o.status === 'pendente' || ACTIVE_STATUSES.includes(o.status))
+  );
+  if (hasActiveOrder) {
+    return res.status(409).json({ error: 'Esse comércio tem uma entrega em andamento — espere ela terminar (ou cancele) antes de excluir.' });
+  }
+  delete db.businesses[b.id];
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Same idea for a motoboy — safe to delete once nothing of theirs is
+// still in flight; their name/phone stay on past orders as a snapshot.
+app.delete('/api/admin/motoboys/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  const hasActiveOrder = Object.values(db.orders).some(
+    (o) => o.motoboyId === m.id && ACTIVE_STATUSES.includes(o.status)
+  );
+  if (hasActiveOrder) {
+    return res.status(409).json({ error: 'Esse motoboy tem uma entrega em andamento — espere ela terminar antes de excluir.' });
+  }
+  delete db.motoboys[m.id];
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Editing a comércio/motoboy's own basic details from the admin panel —
+// same validation as their own self-edit routes above, just reachable by
+// an admin instead of requiring the account holder to do it themselves.
+app.patch('/api/admin/businesses/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  if (typeof req.body.name === 'string' && req.body.name.trim()) b.name = req.body.name.trim();
+  if (typeof req.body.phone === 'string' && req.body.phone.trim()) b.phone = req.body.phone.trim();
+  if (typeof req.body.address === 'string' && req.body.address.trim()) b.address = req.body.address.trim();
+  if (typeof req.body.email === 'string' && req.body.email.trim()) {
+    const emailLower = req.body.email.trim().toLowerCase();
+    const taken = Object.values(db.businesses).some((x) => x.id !== b.id && (x.email || '').toLowerCase() === emailLower);
+    if (taken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+    b.email = emailLower;
+  }
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+app.patch('/api/admin/motoboys/:id/details', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  if (typeof req.body.name === 'string' && req.body.name.trim()) m.name = req.body.name.trim();
+  if (typeof req.body.phone === 'string' && req.body.phone.trim()) m.phone = req.body.phone.trim();
+  if (typeof req.body.vehicle === 'string' && req.body.vehicle.trim()) m.vehicle = req.body.vehicle.trim();
+  if (typeof req.body.email === 'string' && req.body.email.trim()) {
+    const emailLower = req.body.email.trim().toLowerCase();
+    const taken = Object.values(db.motoboys).some((x) => x.id !== m.id && (x.email || '').toLowerCase() === emailLower);
+    if (taken) return res.status(409).json({ error: 'Esse e-mail já está em uso' });
+    m.email = emailLower;
+  }
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
+// ---------------------------------------------------------------
+// Banners — pop-up de tela cheia (imagem única) mostrado ao abrir o app.
+// O ADM cria/edita tudo pelo painel; nenhum código precisa mudar depois.
+// ---------------------------------------------------------------
+const BANNER_AUDIENCES = ['motoboy', 'business', 'both'];
+const BANNER_LINK_TYPES = ['none', 'external', 'internal'];
+
+function sanitizeBannerInput(body, existing) {
+  const b = existing ? Object.assign({}, existing) : {};
+  if (typeof body.imageUrl === 'string') b.imageUrl = body.imageUrl.trim();
+  if (typeof body.audience === 'string' && BANNER_AUDIENCES.includes(body.audience)) b.audience = body.audience;
+  if (typeof body.linkType === 'string' && BANNER_LINK_TYPES.includes(body.linkType)) b.linkType = body.linkType;
+  if (typeof body.linkValue === 'string') b.linkValue = body.linkValue.trim();
+  if (typeof body.active === 'boolean') b.active = body.active;
+  if (typeof body.priority === 'number' && Number.isFinite(body.priority)) b.priority = body.priority;
+  // startAt/endAt chegam como string de <input type="datetime-local">, ou
+  // null/'' pra "sem data definida" (agendamento é opcional em cada ponta).
+  if ('startAt' in body) b.startAt = body.startAt ? new Date(body.startAt).getTime() : null;
+  if ('endAt' in body) b.endAt = body.endAt ? new Date(body.endAt).getTime() : null;
+  return b;
+}
+
+app.get('/api/admin/banners', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const list = Object.values(db.banners).sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  res.json(list);
+});
+
+app.post('/api/admin/banners', requireAuth('admin'), (req, res) => {
+  if (!req.body || !req.body.imageUrl || !String(req.body.imageUrl).trim()) {
+    return res.status(400).json({ error: 'A imagem do banner é obrigatória' });
+  }
+  const db = loadDB();
+  const id = shortId('banner');
+  const banner = sanitizeBannerInput(req.body, {
+    id,
+    imageUrl: '',
+    audience: 'both',
+    linkType: 'none',
+    linkValue: '',
+    active: true,
+    priority: 0,
+    startAt: null,
+    endAt: null,
+    createdAt: Date.now()
+  });
+  db.banners[id] = banner;
+  saveDB(db);
+  res.json(banner);
+});
+
+app.patch('/api/admin/banners/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const existing = db.banners[req.params.id];
+  if (!existing) return res.status(404).json({ error: 'Banner não encontrado' });
+  const updated = sanitizeBannerInput(req.body, existing);
+  db.banners[req.params.id] = updated;
+  saveDB(db);
+  res.json(updated);
+});
+
+app.delete('/api/admin/banners/:id', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  if (!db.banners[req.params.id]) return res.status(404).json({ error: 'Banner não encontrado' });
+  delete db.banners[req.params.id];
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Rota pública (motoboy/comércio logados) — só devolve os banners que
+// estão de fato valendo AGORA para quem está pedindo, já filtrados por
+// público-alvo, ativo/inativo, e janela de data. O app escolhe qual
+// mostrar (1 por sessão, alternando) a partir dessa lista.
+app.get('/api/banners', requireAuth('motoboy', 'business'), (req, res) => {
+  const db = loadDB();
+  const now = Date.now();
+  const list = Object.values(db.banners)
+    .filter((b) => b.active)
+    .filter((b) => b.audience === 'both' || b.audience === req.authType)
+    .filter((b) => !b.startAt || b.startAt <= now)
+    .filter((b) => !b.endAt || b.endAt >= now)
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  res.json(list);
+});
+
+
+
 
 // ---------------------------------------------------------------
 // Businesses
@@ -166,6 +864,9 @@ app.post('/api/businesses/login', async (req, res) => {
   }
   const ok = await bcrypt.compare(password, business.passwordHash);
   if (!ok) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  if (business.blocked) {
+    return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+  }
   const token = createSession(db, 'business', business.id);
   saveDB(db);
   res.json({ token, business: sanitizeBusiness(business) });
@@ -218,7 +919,11 @@ app.patch('/api/businesses/:id', requireAuth('business'), (req, res) => {
 
   if (typeof req.body.name === 'string' && req.body.name.trim()) b.name = req.body.name.trim();
   if (typeof req.body.phone === 'string' && req.body.phone.trim()) b.phone = req.body.phone.trim();
-  if (typeof req.body.address === 'string' && req.body.address.trim()) b.address = req.body.address.trim();
+  if (typeof req.body.address === 'string' && req.body.address.trim()) {
+    const newAddress = req.body.address.trim();
+    if (newAddress !== b.address) b.preciseCoords = null; // old GPS pin no longer matches the new address
+    b.address = newAddress;
+  }
   if (typeof req.body.email === 'string' && req.body.email.trim()) {
     const emailLower = req.body.email.trim().toLowerCase();
     const taken = Object.values(db.businesses).some((x) => x.id !== b.id && (x.email || '').toLowerCase() === emailLower);
@@ -226,6 +931,107 @@ app.patch('/api/businesses/:id', requireAuth('business'), (req, res) => {
     b.email = emailLower;
   }
 
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+// Powers the search box on the map pin picker (see /public + entregas.html) —
+// looks up a handful of candidate addresses so the person can jump the map
+// there instead of panning around manually to find their street.
+app.get('/api/geocode-search', requireAuth('business'), async (req, res) => {
+  const q = (req.query.q || '').toString();
+  if (!q.trim()) return res.json({ results: [] });
+  try {
+    const results = await geocodeSearch(q);
+    res.json({ results });
+  } catch (e) {
+    console.error('Busca de endereço falhou para', q, e.message);
+    res.json({ results: [] });
+  }
+});
+
+// Coordinate -> address, used live while dragging the map pin picker.
+app.get('/api/geocode-reverse', requireAuth('business'), async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return res.status(400).json({ error: 'Coordenadas inválidas' });
+  try {
+    const result = await reverseGeocode(lat, lng);
+    res.json(result);
+  } catch (e) {
+    console.error('Geocodificação reversa falhou para', lat, lng, e.message);
+    res.json({ label: null, hasHouseNumber: false });
+  }
+});
+
+// This business's own delivery addresses used before, most recent first —
+// each already has a confirmed pin from a past order, so picking one skips
+// geocoding entirely (see saveRecentAddress, called from order creation).
+app.get('/api/businesses/:id/recent-addresses', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  res.json(b.recentAddresses || []);
+});
+
+// Lets a business overwrite the geocoded guess with the real GPS position
+// of their shop — captured with the phone physically there. Nominatim
+// (free, address-text-based geocoding) can be off by hundreds of meters,
+// especially on smaller streets or incomplete addresses; an actual GPS fix
+// taken on-site is ground truth and takes priority everywhere pickup
+// distance is calculated.
+app.patch('/api/businesses/:id/location', requireAuth('business'), (req, res) => {  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { lat, lng } = req.body || {};
+  if (typeof lat !== 'number' || typeof lng !== 'number' || Number.isNaN(lat) || Number.isNaN(lng)) {
+    return res.status(400).json({ error: 'Localização inválida' });
+  }
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  b.preciseCoords = { lat, lng };
+  saveDB(db);
+  res.json(sanitizeBusiness(b));
+});
+
+// Same idea as the motoboy push subscription — lets the business's browser
+// register to receive a push when their assigned motoboy arrives at the
+// pickup, even if they're not staring at the tab.
+app.post('/api/businesses/:id/push-subscription', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { subscription } = req.body || {};
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ error: 'Inscrição de notificação inválida' });
+  }
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  if (!Array.isArray(b.pushSubscriptions)) b.pushSubscriptions = [];
+  b.pushSubscriptions = b.pushSubscriptions.filter((s) => s.endpoint !== subscription.endpoint);
+  b.pushSubscriptions.push(subscription);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+app.delete('/api/businesses/:id/push-subscription', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { endpoint } = req.body || {};
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  b.pushSubscriptions = (b.pushSubscriptions || []).filter((s) => s.endpoint !== endpoint);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Marks every in-app aviso as read (business opened the avisos screen) —
+// one request instead of one per notice, since they're always read together.
+app.post('/api/businesses/:id/notices/read-all', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const b = db.businesses[req.params.id];
+  if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
+  (b.notices || []).forEach((n) => { n.read = true; });
   saveDB(db);
   res.json(sanitizeBusiness(b));
 });
@@ -276,6 +1082,7 @@ app.post('/api/motoboys', async (req, res) => {
     passwordHash,
     vehicle,
     status: 'offline', // 'online' | 'pausado' | 'offline'
+    approved: false, // an admin has to approve before this motoboy can go online / receive rides
     createdAt: Date.now()
   };
   db.motoboys[motoboy.id] = motoboy;
@@ -295,6 +1102,9 @@ app.post('/api/motoboys/login', async (req, res) => {
   }
   const ok = await bcrypt.compare(password, motoboy.passwordHash);
   if (!ok) return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+  if (motoboy.blocked) {
+    return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
+  }
   const token = createSession(db, 'motoboy', motoboy.id);
   saveDB(db);
   res.json({ token, motoboy: sanitizeMotoboy(motoboy) });
@@ -336,9 +1146,21 @@ app.get('/api/motoboys/:id', (req, res) => {
   res.json(sanitizeMotoboy(m));
 });
 
+const PICKUP_WINDOW_MS = 16 * 60 * 1000; // minutes the motoboy has to reach the pickup after accepting
+const FORCED_PAUSE_MS = 10 * 60 * 1000; // penalty pause after missing that window
+
 // Reads a motoboy's status, falling back to the old boolean `online` field
-// for accounts created before the online/pausado/offline system existed.
+// for accounts created before the online/pausado/offline system existed,
+// and forcing 'pausado' while a timeout penalty (forcedPauseUntil) is still
+// running — even if the stored `status` field says something else.
 function motoboyStatus(m) {
+  if (m.blocked) return 'offline'; // blocked accounts never receive new rides, no matter their own toggle
+  // approved === false (explicitly) means still awaiting admin review — a
+  // motoboy record from before this feature existed has no `approved`
+  // field at all (undefined), and stays treated as already approved so
+  // existing accounts aren't suddenly locked out by this update.
+  if (m.approved === false) return 'offline';
+  if (m.forcedPauseUntil && Date.now() < m.forcedPauseUntil) return 'pausado';
   if (m.status) return m.status;
   return m.online ? 'online' : 'offline';
 }
@@ -356,12 +1178,44 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
     if (!MOTOBOY_STATUSES.includes(req.body.status)) {
       return res.status(400).json({ error: 'Status inválido' });
     }
+    if (req.body.status === 'online' && m.approved === false) {
+      return res.status(403).json({ error: 'Seu cadastro ainda está em análise — você poderá ficar on-line assim que for aprovado.' });
+    }
+    if (req.body.status === 'online' && m.forcedPauseUntil && Date.now() < m.forcedPauseUntil) {
+      const minutesLeft = Math.ceil((m.forcedPauseUntil - Date.now()) / 60000);
+      return res.status(409).json({
+        error: `Você perdeu a última corrida por não chegar a tempo — aguarde mais ${minutesLeft} min para voltar a ficar on-line.`,
+        forcedPauseUntil: m.forcedPauseUntil
+      });
+    }
     m.status = req.body.status;
     m.online = m.status === 'online'; // kept in sync for backward compatibility
   } else if (typeof req.body.online === 'boolean') {
     // Old clients still sending {online: true/false} — keep working.
+    if (req.body.online && m.approved === false) {
+      return res.status(403).json({ error: 'Seu cadastro ainda está em análise — você poderá ficar on-line assim que for aprovado.' });
+    }
     m.status = req.body.online ? 'online' : 'offline';
     m.online = req.body.online;
+  }
+
+  // Live location ping — the app sends this every so often while the
+  // motoboy is online, so the offer queue can rank by real distance to
+  // the pickup address (see buildOfferQueue), and so the admin panel can
+  // show a live pin. Not required to keep the account online.
+  // "acc" (accuracy, in meters, as reported by the device) travels with
+  // it now too, so bad fixes can be told apart from good ones — both here
+  // and by whoever renders the admin map.
+  if (
+    typeof req.body.lat === 'number' && Number.isFinite(req.body.lat) && Math.abs(req.body.lat) <= 90 &&
+    typeof req.body.lng === 'number' && Number.isFinite(req.body.lng) && Math.abs(req.body.lng) <= 180
+  ) {
+    m.lastLocation = {
+      lat: req.body.lat,
+      lng: req.body.lng,
+      acc: (typeof req.body.acc === 'number' && Number.isFinite(req.body.acc)) ? Math.round(req.body.acc) : null,
+      updatedAt: Date.now()
+    };
   }
 
   if (typeof req.body.name === 'string' && req.body.name.trim()) m.name = req.body.name.trim();
@@ -378,8 +1232,55 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
   res.json(sanitizeMotoboy(m));
 });
 
-app.post('/api/motoboys/:id/change-password', requireAuth('motoboy'), async (req, res) => {
+app.get('/api/push/vapid-public-key', (req, res) => {
+  res.json({ enabled: pushEnabled, publicKey: VAPID_PUBLIC_KEY || null });
+});
+
+// Called by the front-end after the motoboy grants notification permission
+// and subscribes via the service worker's pushManager. One motoboy can have
+// several subscriptions (phone + tablet, or after reinstalling) — endpoint
+// is the unique key, so subscribing again with the same one just updates it.
+app.post('/api/motoboys/:id/push-subscription', requireAuth('motoboy'), (req, res) => {
   if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { subscription } = req.body || {};
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ error: 'Inscrição de notificação inválida' });
+  }
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  if (!Array.isArray(m.pushSubscriptions)) m.pushSubscriptions = [];
+  m.pushSubscriptions = m.pushSubscriptions.filter((s) => s.endpoint !== subscription.endpoint);
+  m.pushSubscriptions.push(subscription);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Called when the motoboy turns notifications off (or the app wants to
+// clean up before unregistering) — removes just this device's subscription.
+app.delete('/api/motoboys/:id/push-subscription', requireAuth('motoboy'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { endpoint } = req.body || {};
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.pushSubscriptions = (m.pushSubscriptions || []).filter((s) => s.endpoint !== endpoint);
+  saveDB(db);
+  res.json({ ok: true });
+});
+
+// Marks every in-app aviso as read (motoboy opened the avisos screen).
+app.post('/api/motoboys/:id/notices/read-all', requireAuth('motoboy'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  (m.notices || []).forEach((n) => { n.read = true; });
+  saveDB(db);
+  res.json(sanitizeMotoboy(m));
+});
+
+app.post('/api/motoboys/:id/change-password', requireAuth('motoboy'), async (req, res) => {
   const { currentPassword, newPassword, confirmPassword } = req.body || {};
   if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Preencha todos os campos' });
   if (newPassword !== confirmPassword) return res.status(400).json({ error: 'As senhas não coincidem' });
@@ -413,10 +1314,15 @@ app.get('/api/me', (req, res) => {
   if (session.type === 'business') {
     const b = db.businesses[session.id];
     if (!b) return res.status(401).json({ error: 'Conta não encontrada' });
+    if (b.blocked) return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
     return res.json({ type: 'business', profile: sanitizeBusiness(b) });
+  }
+  if (session.type === 'admin') {
+    return res.json({ type: 'admin', profile: { id: 'admin', name: 'Administrador' } });
   }
   const m = db.motoboys[session.id];
   if (!m) return res.status(401).json({ error: 'Conta não encontrada' });
+  if (m.blocked) return res.status(403).json({ error: 'Esta conta foi bloqueada. Fale com o suporte.' });
   res.json({ type: 'motoboy', profile: sanitizeMotoboy(m) });
 });
 
@@ -460,6 +1366,61 @@ app.get('/api/businesses/:id/transactions', requireAuth('business'), (req, res) 
   res.json(list);
 });
 
+// A simple, printable internal summary/receipt for the business — NOT an
+// official fiscal invoice (nota fiscal eletrônica). Brazilian tax rules for
+// that depend on how the business is registered (CNPJ/MEI/etc) and usually
+// require a paid third-party integration (NFe.io, Focus NFe...), which is
+// out of scope here. This just totals up what the business actually spent
+// in a period, for their own records.
+app.get('/api/businesses/:id/invoice', requireAuth('business'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const db = loadDB();
+  const business = db.businesses[req.params.id];
+  if (!business) return res.status(404).json({ error: 'Comércio não encontrado' });
+
+  const period = ['hoje', 'semana', 'mes'].includes(req.query.period) ? req.query.period : 'mes';
+  const now = new Date();
+  let start;
+  let rangeLabel;
+  if (period === 'hoje') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    rangeLabel = 'Hoje (' + now.toLocaleDateString('pt-BR') + ')';
+  } else if (period === 'semana') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime();
+    rangeLabel = 'Últimos 7 dias';
+  } else {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29).getTime();
+    rangeLabel = 'Últimos 30 dias';
+  }
+
+  const orders = Object.values(db.orders)
+    .filter((o) => o.businessId === business.id && o.status === 'entregue' && o.deliveredAt >= start)
+    .sort((a, b) => a.deliveredAt - b.deliveredAt);
+
+  const totalCreditsSpent = orders.length * CREDIT_COST_PER_RIDE;
+  const totalPaidToMotoboys = sumMoney(orders, (o) => o.value);
+
+  res.json({
+    business: { name: business.name, email: business.email, phone: business.phone, address: business.address },
+    period,
+    rangeLabel,
+    generatedAt: Date.now(),
+    orders: orders.map((o) => ({
+      id: o.id,
+      deliveredAt: o.deliveredAt,
+      value: o.value,
+      pickupAddress: o.pickupAddress,
+      deliveryAddress: o.deliveryAddress,
+      motoboyName: o.motoboyName || null
+    })),
+    totals: {
+      deliveredCount: orders.length,
+      totalCreditsSpent,
+      totalPaidToMotoboys
+    }
+  });
+});
+
 // ---------------------------------------------------------------
 // Credits (Pix top-up via Mercado Pago)
 // ---------------------------------------------------------------
@@ -500,7 +1461,7 @@ app.post('/api/businesses/:id/topup', requireAuth('business'), async (req, res) 
     const mpRes = await mpPayment.create({
       body: {
         transaction_amount: value,
-        description: 'Créditos Despacho — ' + business.name,
+        description: 'Créditos ChegouJá — ' + business.name,
         payment_method_id: 'pix',
         payer
       }
@@ -588,10 +1549,27 @@ function rideCount(db, motoboyId) {
   ).length;
 }
 
-// Who gets offered the ride first: only online + free motoboys, ordered by
-// whoever has done the fewest rides so far (spreads the work around).
-// If you later add geocoded addresses, sort by distance here instead.
-function buildOfferQueue(db) {
+// How old a motoboy's last known GPS fix can be and still count as "live"
+// for distance sorting. Older than this, we treat them as if we don't
+// know where they are (falls back to the fewest-rides rule for them).
+const LOCATION_FRESHNESS_MS = 10 * 60 * 1000; // 10 minutes
+
+function hasFreshLocation(m) {
+  return !!(
+    m.lastLocation &&
+    typeof m.lastLocation.lat === 'number' &&
+    typeof m.lastLocation.lng === 'number' &&
+    Date.now() - (m.lastLocation.updatedAt || 0) <= LOCATION_FRESHNESS_MS
+  );
+}
+
+// Who gets offered the ride first: only online + free motoboys.
+// If we know the pickup coordinates AND a motoboy's recent live location,
+// the nearest motoboy goes first — that's the fair, real-world way to do
+// it. Motoboys we can't place (no fresh GPS, or the pickup address didn't
+// geocode) fall back to "fewest rides so far", same as before, and are
+// slotted in after everyone we could measure a distance for.
+function buildOfferQueue(db, pickupCoords) {
   const candidates = Object.values(db.motoboys).filter((m) => {
     if (motoboyStatus(m) !== 'online') return false; // pausado/offline never receive new rides
     const busy = Object.values(db.orders).some(
@@ -599,7 +1577,18 @@ function buildOfferQueue(db) {
     );
     return !busy;
   });
-  candidates.sort((a, b) => rideCount(db, a.id) - rideCount(db, b.id));
+
+  candidates.sort((a, b) => {
+    const aHasDist = !!pickupCoords && hasFreshLocation(a);
+    const bHasDist = !!pickupCoords && hasFreshLocation(b);
+    if (aHasDist && bHasDist) {
+      const da = distanceMeters(a.lastLocation.lat, a.lastLocation.lng, pickupCoords.lat, pickupCoords.lng);
+      const db_ = distanceMeters(b.lastLocation.lat, b.lastLocation.lng, pickupCoords.lat, pickupCoords.lng);
+      return da - db_;
+    }
+    if (aHasDist !== bHasDist) return aHasDist ? -1 : 1; // known distance beats unknown
+    return rideCount(db, a.id) - rideCount(db, b.id); // tiebreaker / fallback
+  });
   return candidates.map((m) => m.id);
 }
 
@@ -611,11 +1600,12 @@ function buildOfferQueue(db) {
 function advanceOffer(db, o) {
   o.offerIndex += 1;
   if (o.offerIndex >= o.offerQueue.length) {
-    o.offerQueue = buildOfferQueue(db);
+    o.offerQueue = buildOfferQueue(db, o.pickupCoords);
     o.offerIndex = 0;
     o.declinedBy = []; // fresh round — everyone gets asked again
   }
   o.offeredAt = o.offerQueue.length > 0 ? Date.now() : null;
+  notifyOfferedMotoboy(db, o);
 }
 
 function isOfferedTo(o, motoboyId) {
@@ -628,9 +1618,51 @@ function isOfferedTo(o, motoboyId) {
 
 const CREDIT_COST_PER_RIDE = 1; // every delivery costs exactly 1 credit, no matter what the motoboy is paid
 
+// ---------------------------------------------------------------
+// Recent delivery addresses — every business keeps a short list of
+// addresses they've actually delivered to before, each with its already-
+// confirmed pin (whatever coordinates were used for that order — geocoded
+// or manually adjusted on the map). Picking one of these next time skips
+// geocoding entirely and reuses the known-good pin, exactly like a "usados
+// recentemente" list in a real maps app — and it's more reliable than a
+// fresh geocode for a repeat customer, since it's whatever this business
+// already confirmed works.
+// ---------------------------------------------------------------
+const RECENT_ADDRESS_CAP = 40;
+function saveRecentAddress(business, address, coords) {
+  if (!address || !address.trim() || !coords) return;
+  const norm = address.trim().toLowerCase();
+  if (!Array.isArray(business.recentAddresses)) business.recentAddresses = [];
+  const idx = business.recentAddresses.findIndex((a) => a.address.trim().toLowerCase() === norm);
+  if (idx !== -1) {
+    const existing = business.recentAddresses[idx];
+    existing.lat = coords.lat;
+    existing.lng = coords.lng;
+    existing.lastUsedAt = Date.now();
+    existing.useCount = (existing.useCount || 1) + 1;
+    business.recentAddresses.splice(idx, 1);
+    business.recentAddresses.unshift(existing);
+  } else {
+    business.recentAddresses.unshift({
+      address: address.trim(),
+      lat: coords.lat,
+      lng: coords.lng,
+      lastUsedAt: Date.now(),
+      useCount: 1
+    });
+  }
+  if (business.recentAddresses.length > RECENT_ADDRESS_CAP) business.recentAddresses.length = RECENT_ADDRESS_CAP;
+}
+
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
-  const { pickupAddress, deliveryAddress, value, note } = req.body || {};
+  const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip } = req.body || {};
+  // TEMP DEBUG — investigando um relato de valor de entrega chegando errado
+  // (ex: comércio digitou 8, entrega saiu com 7.98). Isto grava exatamente
+  // o que chegou no corpo da requisição, antes de qualquer parseFloat, pra
+  // conferir nos logs do servidor se a corrupção já chega daí ou acontece
+  // depois. Remover depois que o problema for identificado/confirmado.
+  console.log('[DEBUG valor recebido]', { raw: value, type: typeof value, businessId: req.authId, at: new Date().toISOString() });
   const db = loadDB();
   const business = db.businesses[businessId];
   if (!business) return res.status(404).json({ error: 'Comércio não encontrado' });
@@ -639,18 +1671,41 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   }
   const rideValue = parseFloat(value) || 0; // what the motoboy gets paid — unrelated to credits now
   const currentCredits = business.credits || 0;
-  if (currentCredits < CREDIT_COST_PER_RIDE) {
+  const freeNow = hasFreeCredits(business); // admin-granted free-credits promo — see hasFreeCredits
+  if (!freeNow && currentCredits < CREDIT_COST_PER_RIDE) {
     return res.status(402).json({
       error: `Créditos insuficientes (você tem ${currentCredits.toFixed(2)}) — adicione créditos para solicitar esta entrega.`,
       credits: currentCredits
     });
   }
-  const offerQueue = buildOfferQueue(db);
-
-  // Geocode both addresses so we can later enforce the GPS arrival lock.
+  // Geocode both addresses so we can later enforce the GPS arrival lock,
+  // and so the offer queue below can prioritize the nearest motoboy.
   // Sequential on purpose — keeps us within Nominatim's rate limit.
-  const pickupCoords = await geocodeAddress(pickupAddress);
-  const deliveryCoords = await geocodeAddress(deliveryAddress);
+  //
+  // If the pickup address matches the business's own registered address
+  // AND they've marked their exact GPS location (see PATCH .../location),
+  // use that instead of geocoding — a real on-site GPS fix beats guessing
+  // coordinates from an address string every time.
+  const usePreciseForPickup = business.preciseCoords && pickupAddress.trim() === (business.address || '').trim();
+  const pickupCoords = usePreciseForPickup ? business.preciseCoords : await geocodeAddress(pickupAddress);
+
+  // Same idea for the delivery address: it's typed fresh every order (it's
+  // the customer's address, not the business's own), so there's no saved
+  // profile coordinate to reuse — but the business can pin-drop it on the
+  // map picker for THIS order (see the "marcar local exato" link on the
+  // new-order form), which also beats guessing from the address text.
+  const hasValidOverride =
+    deliveryCoordsOverride &&
+    typeof deliveryCoordsOverride.lat === 'number' &&
+    typeof deliveryCoordsOverride.lng === 'number' &&
+    !Number.isNaN(deliveryCoordsOverride.lat) &&
+    !Number.isNaN(deliveryCoordsOverride.lng);
+  const deliveryCoords = hasValidOverride ? deliveryCoordsOverride : await geocodeAddress(deliveryAddress);
+
+
+  // Built AFTER geocoding so it can sort candidates by real distance to
+  // the pickup address instead of just fewest-rides-so-far.
+  const offerQueue = buildOfferQueue(db, pickupCoords);
 
   const order = {
     id: shortId('ord'),
@@ -662,12 +1717,13 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     pickupCoords, // {lat,lng} or null if the address couldn't be located
     deliveryCoords,
     value: rideValue, // paid to the motoboy — does not affect credit balance
+    debugRawValue: value, // TEMP DEBUG — o que chegou cru no corpo da requisição, antes do parseFloat. Remover depois.
     note: note || '',
+    roundTrip: !!roundTrip, // motoboy needs to come back to the pickup point before the order counts as done
     status: 'pendente',
     motoboyId: null,
     motoboyName: null,
     motoboyPhone: null,
-    creditsCharged: true,
     offerQueue,
     offerIndex: 0,
     offeredAt: offerQueue.length > 0 ? Date.now() : null,
@@ -677,6 +1733,8 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     arrivedPickupAt: null,
     departedAt: null,
     arrivedDeliveryAt: null,
+    returnDepartedAt: null,
+    arrivedReturnAt: null,
     deliveredAt: null,
     cancelledAt: null,
     ratedByBusiness: false,
@@ -685,13 +1743,20 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   // Re-read the db in case anything else wrote in the meantime (geocoding awaited above).
   const freshDb = loadDB();
   const freshBusiness = freshDb.businesses[businessId];
-  if (!freshBusiness || (freshBusiness.credits || 0) < CREDIT_COST_PER_RIDE) {
+  if (!freshBusiness) return res.status(404).json({ error: 'Comércio não encontrado' });
+  const freeFinal = hasFreeCredits(freshBusiness); // re-checked fresh, same reasoning as freeNow above
+  if (!freeFinal && (freshBusiness.credits || 0) < CREDIT_COST_PER_RIDE) {
     return res.status(402).json({ error: 'Créditos insuficientes — adicione créditos para solicitar esta entrega.' });
   }
-  freshBusiness.credits -= CREDIT_COST_PER_RIDE;
+  order.creditsCharged = !freeFinal; // false for a free ride — nothing to refund later if it's canceled
+  if (!freeFinal) {
+    freshBusiness.credits -= CREDIT_COST_PER_RIDE;
+    addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
+  }
+  saveRecentAddress(freshBusiness, deliveryAddress, deliveryCoords);
   freshDb.orders[order.id] = order;
-  addTransaction(freshDb, businessId, 'debito', CREDIT_COST_PER_RIDE, 'Entrega #' + order.id.slice(-6).toUpperCase() + ' (motoboy recebe ' + rideValue.toFixed(2) + ')', order.id);
   saveDB(freshDb);
+  notifyOfferedMotoboy(freshDb, order);
   res.json(order);
 });
 
@@ -763,6 +1828,85 @@ app.post('/api/orders/:id/decline', requireAuth('motoboy'), (req, res) => {
   res.json(o);
 });
 
+// A motoboy who already accepted, but needs to back out before actually
+// picking up the package (car broke down, emergency, etc). Unlike /cancel,
+// this does NOT kill the order or refund the business — it puts the ride
+// straight back into the offer queue for the next motoboy in line, exactly
+// like a decline, so the business never has to notice or re-create it.
+// Only allowed up to 'aceito' — once the package is physically in the
+// motoboy's hands (arrived at pickup or later), backing out is a real
+// problem for the business to know about, so that still has to go through
+// /cancel instead.
+app.post('/api/orders/:id/give-up', requireAuth('motoboy'), (req, res) => {
+  const motoboyId = req.authId;
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== motoboyId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (o.status !== 'aceito') {
+    return res.status(409).json({
+      error: 'Só dá pra devolver a corrida antes de retirar o pedido — depois disso, cancele em vez disso.'
+    });
+  }
+  o.declinedBy = Array.from(new Set([...(o.declinedBy || []), motoboyId]));
+  o.status = 'pendente';
+  o.motoboyId = null;
+  o.motoboyName = null;
+  o.motoboyPhone = null;
+  o.acceptedAt = null;
+  advanceOffer(db, o); // hands it to the next motoboy in line, fresh 30s window
+  saveDB(db);
+  res.json(o);
+});
+
+// ---------------------------------------------------------------
+// Suporte — o motoboy usa isso quando algo dá errado NO MEIO da entrega
+// (endereço/localização errada, cliente não atende, acidente, etc.), ou
+// seja, depois de já ter retirado o pedido — é exatamente o cenário que
+// "give-up" não cobre (aquele só funciona antes da retirada). Isso não
+// resolve nada sozinho: só sinaliza pro admin, que decide encerrar a
+// corrida ou devolvê-la pro comércio (ver as duas rotas admin abaixo).
+// ---------------------------------------------------------------
+const SUPPORT_REASONS = ['endereco_errado', 'cliente_ausente', 'problema_pedido', 'acidente_emergencia', 'outro'];
+const SUPPORT_REASON_LABELS = {
+  endereco_errado: 'Endereço/localização errada',
+  cliente_ausente: 'Cliente não atende / não está no local',
+  problema_pedido: 'Problema com o pedido',
+  acidente_emergencia: 'Acidente ou emergência',
+  outro: 'Outro'
+};
+app.post('/api/orders/:id/support', requireAuth('motoboy'), (req, res) => {
+  const motoboyId = req.authId;
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== motoboyId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (!ACTIVE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Só dá pra pedir suporte numa corrida em andamento.' });
+  }
+  const { reason, note } = req.body || {};
+  if (!SUPPORT_REASONS.includes(reason)) return res.status(400).json({ error: 'Selecione um motivo válido' });
+  o.support = {
+    reason,
+    note: (note || '').trim() || null,
+    status: 'aberto',
+    reportedAt: Date.now(),
+    resolvedAt: null,
+    resolvedAction: null,
+    resolvedNote: null
+  };
+  const business = db.businesses[o.businessId];
+  if (business) {
+    pushNotice(db, 'businesses', o.businessId, {
+      title: 'Aviso sobre a entrega #' + o.id.slice(-6).toUpperCase(),
+      body: 'O motoboy reportou um problema: ' + (SUPPORT_REASON_LABELS[reason] || reason) + (note ? ' — ' + note.trim() : '') + '. Nosso suporte já foi avisado.',
+      promo: false
+    });
+  }
+  saveDB(db);
+  res.json(o);
+});
+
 // One helper for the straight-line stage transitions that DON'T need a
 // GPS check (departing doesn't require proximity to anything). Only the
 // motoboy assigned to this specific order can advance it.
@@ -807,11 +1951,31 @@ function arrivalTransition(fromStatus, toStatus, coordsField, extraFields) {
     }
     if (target && geo) {
       const dist = Math.round(distanceMeters(geo.lat, geo.lng, target.lat, target.lng));
-      if (dist > ARRIVAL_RADIUS_METERS) {
-        return res.status(409).json({
-          error: `Você está a ${dist}m do endereço — chegue mais perto (até ${ARRIVAL_RADIUS_METERS}m) para confirmar.`,
-          distance: dist
-        });
+      // A GPS fix always comes with a margin of error (geo.acc, in meters —
+      // e.g. weak signal indoors or on a laptop can easily mean 200-400m).
+      // If we ignore that margin, an honestly-arrived motoboy with a rough
+      // fix gets wrongly blocked. So we allow the distance to exceed the
+      // radius by up to the reported accuracy (capped, so a wildly
+      // inaccurate/spoofed reading can't just disable the lock entirely).
+      const accuracyAllowance = Math.min(typeof geo.acc === 'number' ? geo.acc : 0, MAX_ACCURACY_ALLOWANCE_METERS);
+      const effectiveRadius = ARRIVAL_RADIUS_METERS + accuracyAllowance;
+      if (dist > effectiveRadius) {
+        // Real apps (Uber, iFood...) don't hard-block a delivery just
+        // because a sensor reading looked off — a GPS chip having a bad
+        // moment shouldn't be able to strand a legitimately-arrived
+        // motoboy. So after the normal check fails once, the app offers
+        // "confirmar mesmo assim" — which comes back here as
+        // override:true. We allow it, but log exactly how far off it
+        // was so admin can review anything that looks abusive later.
+        if (!req.body.override) {
+          return res.status(409).json({
+            error: `Você está a ${dist}m do endereço — chegue mais perto (até ${effectiveRadius}m, considerando a precisão do seu GPS) para confirmar.`,
+            distance: dist,
+            canOverride: true
+          });
+        }
+        o.arrivalOverrides = o.arrivalOverrides || [];
+        o.arrivalOverrides.push({ field: coordsField, distance: dist, effectiveRadius, at: Date.now() });
       }
     }
     // No coordinates for this address at all (geocoding never found it) —
@@ -819,6 +1983,13 @@ function arrivalTransition(fromStatus, toStatus, coordsField, extraFields) {
     Object.assign(o, extraFields(req.body || {}));
     o.status = toStatus;
     saveDB(db);
+    if (coordsField === 'pickupCoords' && toStatus === 'no_local_retirada') {
+      notifyBusiness(o.businessId, {
+        title: '🏍️ O motoboy chegou!',
+        body: (o.motoboyName || 'O motoboy') + ' está na sua loja para retirar o pedido #' + o.id.slice(-6).toUpperCase(),
+        data: { type: 'motoboy-arrived', orderId: o.id }
+      });
+    }
     res.json(o);
   };
 }
@@ -844,11 +2015,70 @@ app.post(
     arrivedDeliveryGeo: body.geo || null
   }))
 );
+app.post('/api/orders/:id/deliver', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  // Round-trip orders finish through complete-return instead — this keeps
+  // a motoboy from skipping the return leg by hitting the "normal" finish
+  // button (the client shouldn't even show it for a round-trip order, but
+  // the server is the one that actually has to enforce it).
+  if (o.roundTrip) {
+    return res.status(409).json({ error: 'Essa corrida é ida e volta — confirme a volta antes de concluir.' });
+  }
+  if (o.status !== 'no_local_entrega') {
+    return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
+  }
+  o.deliveredAt = Date.now();
+  o.status = 'entregue';
+  saveDB(db);
+  res.json(o);
+});
+
+// ---- Ida e volta: dois passos extras, só existem quando o.roundTrip ----
+// Depois de entregar no destino, em vez de encerrar, o motoboy declara que
+// está voltando (sem checagem de GPS, igual o /depart normal), depois
+// confirma a chegada de volta com o mesmo travamento de GPS de sempre — só
+// que o alvo agora é o pickupCoords (voltando para o ponto de retirada
+// original), e só então a corrida realmente termina.
+app.post('/api/orders/:id/depart-return', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (!o.roundTrip) return res.status(409).json({ error: 'Essa corrida não é ida e volta' });
+  if (o.status !== 'no_local_entrega') {
+    return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
+  }
+  o.status = 'retornando';
+  o.returnDepartedAt = Date.now();
+  saveDB(db);
+  res.json(o);
+});
+
 app.post(
-  '/api/orders/:id/deliver',
+  '/api/orders/:id/arrive-return',
   requireAuth('motoboy'),
-  stageTransition('no_local_entrega', 'entregue', () => ({ deliveredAt: Date.now() }))
+  arrivalTransition('retornando', 'no_local_retorno', 'pickupCoords', (body) => ({
+    arrivedReturnAt: Date.now(),
+    arrivedReturnGeo: body.geo || null
+  }))
 );
+
+app.post('/api/orders/:id/complete-return', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (o.status !== 'no_local_retorno') {
+    return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
+  }
+  o.deliveredAt = Date.now();
+  o.status = 'entregue';
+  saveDB(db);
+  res.json(o);
+});
 
 // ---------------------------------------------------------------
 // Ratings — one review per side per completed order (business rates the
@@ -918,6 +2148,9 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
   const isOwner = req.authType === 'business' && o.businessId === req.authId;
   const isAssignedMotoboy = req.authType === 'motoboy' && o.motoboyId === req.authId;
   if (!isOwner && !isAssignedMotoboy) return res.status(403).json({ error: 'Você não pode cancelar essa corrida' });
+  if (!CANCELABLE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'Essa corrida já está com o pedido a caminho (ou concluída) — não dá mais pra cancelar.' });
+  }
   const { reason, note } = req.body || {};
   if (!reason) return res.status(400).json({ error: 'Selecione um motivo para o cancelamento' });
   if (o.creditsCharged) {
@@ -938,7 +2171,16 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
 });
 
 // ---------------------------------------------------------------
-// Background job — advances any offer that timed out without a response.
+// Background job — advances any offer that timed out without a response,
+// and takes back rides from motoboys who accepted but never reached the
+// pickup within PICKUP_WINDOW_MS (same 16-minute window the app already
+// shows as a countdown). That motoboy loses the ride — it goes straight
+// back into the queue for the next one in line, same as a manual "give up"
+// — and gets a forced 10-minute pause before they can go online again.
+// (Only the pickup leg is handled this way: once a motoboy has actually
+// picked up the package, en route to the delivery, there's no one else to
+// hand a physical package to, so a late delivery can't be reassigned the
+// same way — that stays a business decision via cancel/support instead.)
 // Runs on the server itself, so it works even if every phone is asleep.
 // ---------------------------------------------------------------
 setInterval(() => {
@@ -958,165 +2200,65 @@ setInterval(() => {
       advanceOffer(db, o);
       changed = true;
     }
-  });
-  if (changed) saveDB(db);
-}, 5000);
 
-// ---------------------------------------------------------------
-// Support chat — a single ongoing conversation per motoboy, stored on the
-// server. A message can optionally be tied to the order the motoboy was
-// doing when they asked for help (orderId), which is what the "problema
-// para concluir a entrega" button sends.
-//
-// Support staff replies through the admin endpoints at the bottom, which
-// are protected by the SUPPORT_ADMIN_TOKEN environment variable (set it on
-// Railway, same place as MERCADOPAGO_ACCESS_TOKEN). There is no admin
-// screen in the app yet — see the note in the README.
-// ---------------------------------------------------------------
-const SUPPORT_MESSAGE_MAX = 1500;
+    if (o.status === 'aceito' && o.acceptedAt && Date.now() - o.acceptedAt > PICKUP_WINDOW_MS) {
+      const missedMotoboyId = o.motoboyId;
+      o.declinedBy = Array.from(new Set([...(o.declinedBy || []), missedMotoboyId]));
+      o.status = 'pendente';
+      o.motoboyId = null;
+      o.motoboyName = null;
+      o.motoboyPhone = null;
+      o.acceptedAt = null;
+      o.missedPickupBy = Array.from(new Set([...(o.missedPickupBy || []), missedMotoboyId]));
+      advanceOffer(db, o);
 
-function supportMessagesFor(db, motoboyId) {
-  return Object.values(db.supportMessages || {})
-    .filter((msg) => msg.motoboyId === motoboyId)
-    .sort((a, b) => a.createdAt - b.createdAt);
-}
-
-function addSupportMessage(db, { motoboyId, orderId, fromType, text }) {
-  db.supportMessages = db.supportMessages || {};
-  const id = shortId('sup');
-  db.supportMessages[id] = {
-    id,
-    motoboyId,
-    orderId: orderId || null,
-    fromType, // 'motoboy' | 'suporte'
-    text,
-    createdAt: Date.now(),
-    readByMotoboy: fromType === 'motoboy' // own messages start as read
-  };
-  return db.supportMessages[id];
-}
-
-// Motoboy reads their own conversation. Marks support replies as read,
-// so the unread badge clears once they've actually opened the chat.
-app.get('/api/support/messages', requireAuth('motoboy'), (req, res) => {
-  const db = loadDB();
-  const list = supportMessagesFor(db, req.authId);
-  let changed = false;
-  list.forEach((msg) => {
-    if (msg.fromType === 'suporte' && !msg.readByMotoboy) {
-      msg.readByMotoboy = true;
+      const missedMotoboy = db.motoboys[missedMotoboyId];
+      if (missedMotoboy) {
+        missedMotoboy.forcedPauseUntil = Date.now() + FORCED_PAUSE_MS;
+        missedMotoboy.status = 'online'; // stored status stays 'online' — motoboyStatus() overrides to 'pausado' meanwhile, then this takes over automatically once the pause is over
+      }
       changed = true;
     }
   });
   if (changed) saveDB(db);
-  res.json(list);
-});
+}, 5000);
 
-// Lightweight unread count — polled by the app so the support button can
-// show a badge without pulling the whole conversation every few seconds.
-app.get('/api/support/unread', requireAuth('motoboy'), (req, res) => {
-  const db = loadDB();
-  const count = supportMessagesFor(db, req.authId).filter(
-    (msg) => msg.fromType === 'suporte' && !msg.readByMotoboy
-  ).length;
-  res.json({ unread: count });
-});
-
-app.post('/api/support/messages', requireAuth('motoboy'), (req, res) => {
-  const text = ((req.body && req.body.text) || '').toString().trim();
-  if (!text) return res.status(400).json({ error: 'Escreva sua mensagem' });
-  if (text.length > SUPPORT_MESSAGE_MAX) {
-    return res.status(400).json({ error: `Mensagem muito longa (máximo ${SUPPORT_MESSAGE_MAX} caracteres)` });
-  }
-  const db = loadDB();
-
-  // Only accept an orderId that really belongs to this motoboy — never
-  // trust the client to tag a message with someone else's delivery.
-  let orderId = (req.body && req.body.orderId) || null;
-  if (orderId) {
-    const o = db.orders[orderId];
-    if (!o || o.motoboyId !== req.authId) orderId = null;
-  }
-
-  const msg = addSupportMessage(db, { motoboyId: req.authId, orderId, fromType: 'motoboy', text });
-  saveDB(db);
-  res.json(msg);
-});
-
-// --- Admin side (support staff) ---
-// Protected by a shared token instead of a login, since there is no
-// support-staff account type in the system yet.
-function requireSupportAdmin(req, res, next) {
-  const expected = process.env.SUPPORT_ADMIN_TOKEN || '';
-  if (!expected) {
-    return res.status(503).json({ error: 'Suporte não configurado neste servidor (falta SUPPORT_ADMIN_TOKEN).' });
-  }
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (token !== expected) return res.status(401).json({ error: 'Não autorizado' });
-  next();
-}
-
-// One row per motoboy who has ever written in, newest activity first.
-app.get('/api/support/threads', requireSupportAdmin, (req, res) => {
-  const db = loadDB();
-  const byMotoboy = {};
-  Object.values(db.supportMessages || {}).forEach((msg) => {
-    const m = db.motoboys[msg.motoboyId];
-    if (!byMotoboy[msg.motoboyId]) {
-      byMotoboy[msg.motoboyId] = {
-        motoboyId: msg.motoboyId,
-        motoboyName: m ? m.name : '(motoboy removido)',
-        motoboyPhone: m ? m.phone : null,
-        lastMessageAt: 0,
-        lastMessageText: '',
-        awaitingReply: false,
-        messageCount: 0
-      };
+// Serve the front-end (entregas.html) from this same server, so the one
+// Railway URL works both as the API and as the app link people open on
+// their phone. IMPORTANT: only this one file is exposed — never the whole
+// folder (data.json has password hashes and personal data in it, and must
+// never be reachable over HTTP).
+const path = require('path');
+// PWA assets (manifest, icon, service worker) live in their own folder —
+// express.static only exposes what's inside public/, never the project
+// root, so data.json (password hashes, personal data) stays unreachable.
+// ---- Digital Asset Links (necessário pro app Android confiar neste site) ----
+// Precisa vir ANTES do app.use(express.static(...)) abaixo, porque o
+// Express por padrão bloqueia pastas que começam com ponto, como .well-known.
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  res.json([
+    {
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.chegouja.app",
+        "sha256_cert_fingerprints": [
+          "57:1D:8D:40:B9:0C:4B:1B:5B:55:CA:FA:9D:36:1C:14:AA:78:F0:E9:37:2D:9E:DA:A2:6B:33:E0:E2:3C:D5:22"
+        ]
+      }
     }
-    const t = byMotoboy[msg.motoboyId];
-    t.messageCount += 1;
-    if (msg.createdAt >= t.lastMessageAt) {
-      t.lastMessageAt = msg.createdAt;
-      t.lastMessageText = msg.text;
-      t.awaitingReply = msg.fromType === 'motoboy';
-    }
-  });
-  const list = Object.values(byMotoboy).sort((a, b) => b.lastMessageAt - a.lastMessageAt);
-  res.json(list);
+  ]);
 });
 
-app.get('/api/support/threads/:motoboyId', requireSupportAdmin, (req, res) => {
-  const db = loadDB();
-  res.json(supportMessagesFor(db, req.params.motoboyId));
-});
-
-app.post('/api/support/threads/:motoboyId/reply', requireSupportAdmin, (req, res) => {
-  const text = ((req.body && req.body.text) || '').toString().trim();
-  if (!text) return res.status(400).json({ error: 'Escreva a resposta' });
-  if (text.length > SUPPORT_MESSAGE_MAX) {
-    return res.status(400).json({ error: `Mensagem muito longa (máximo ${SUPPORT_MESSAGE_MAX} caracteres)` });
-  }
-  const db = loadDB();
-  if (!db.motoboys[req.params.motoboyId]) return res.status(404).json({ error: 'Motoboy não encontrado' });
-  const msg = addSupportMessage(db, {
-    motoboyId: req.params.motoboyId,
-    orderId: null,
-    fromType: 'suporte',
-    text
-  });
-  saveDB(db);
-  res.json(msg);
-});
-
-// Support staff screen — served by this same server, so it's reachable at
-// https://SEU-SERVIDOR/suporte . It asks for SUPPORT_ADMIN_TOKEN on open;
-// the page itself contains no secrets.
-app.get('/suporte', (req, res) => {
-  res.sendFile(require('path').join(__dirname, 'suporte.html'));
-});
-
-app.get('/', (req, res) => res.send('Despacho API rodando ✅'));
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'entregas.html')));
+app.get('/entregas.html', (req, res) => res.sendFile(path.join(__dirname, 'entregas.html')));
+// Admin panel — a completely separate page from the business/motoboy app,
+// with its own link. Not linked from entregas.html at all; whoever runs
+// the operation just needs to know/bookmark this address directly.
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.get('/api', (req, res) => res.send('ChegouJá API rodando ✅'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Despacho API na porta ' + PORT));
+app.listen(PORT, () => console.log('ChegouJá API na porta ' + PORT));

@@ -3,20 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Despacho — Entregas por moto</title>
+<title>ChegouJá — Entregas por moto</title>
 
 <!-- PWA: makes it installable with an icon and full-screen (no browser bar) -->
 <meta name="theme-color" content="#101215">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Despacho">
-<link id="apple-touch-icon" rel="apple-touch-icon">
-<link id="favicon-icon" rel="icon" type="image/svg+xml">
-<link id="manifest-link" rel="manifest">
+<meta name="apple-mobile-web-app-title" content="ChegouJá">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="manifest" href="/manifest.json">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Leaflet: free map + draggable pin for confirming exact pickup location.
+     Uses OpenStreetMap tiles — no API key/billing needed. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root{
     --bg:#101215;
@@ -33,12 +38,21 @@
     --font-mono:'IBM Plex Mono', monospace;
   }
   *{box-sizing:border-box;}
+  html{
+    /* Stops the browser's native "pull down to reload" gesture from
+       firing a full page reload — without this, pulling down anywhere
+       near the top of the page reloads the whole app (and used to look
+       exactly like being logged out, back when the session wasn't
+       actually being saved anywhere — see the storage helpers below). */
+    overscroll-behavior-y: contain;
+  }
   body{
     margin:0;
     background:var(--bg);
     color:var(--text);
     font-family:var(--font-body);
     -webkit-font-smoothing:antialiased;
+    overscroll-behavior-y: contain;
   }
   #app{
     max-width:520px;
@@ -91,6 +105,25 @@
     color:var(--muted);
     text-transform:uppercase;
     letter-spacing:0.5px;
+  }
+  .notice-dot{
+    position:absolute; top:-4px; right:-4px;
+    background:var(--orange, #ff6a00); color:#1a0800;
+    font-family:var(--font-mono); font-size:9px; font-weight:700;
+    border-radius:999px; min-width:15px; height:15px; padding:0 3px;
+    display:flex; align-items:center; justify-content:center; line-height:1;
+  }
+  .notice-item{
+    border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px;
+  }
+  .notice-item.unread{ border-color:var(--lime); }
+  .notice-item-title{ font-size:14px; font-weight:600; margin-bottom:4px; }
+  .notice-item-body{ font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:6px; }
+  .notice-item-date{ font-size:11px; color:var(--muted); font-family:var(--font-mono); }
+  .free-credits-banner{
+    display:flex; align-items:center; gap:8px; background:rgba(120,220,120,0.1);
+    border:1px solid var(--ok, #6fd66f); color:var(--ok, #6fd66f);
+    border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
   }
   .btn-ghost{
     background:none;
@@ -156,6 +189,32 @@
     margin-top:10px;
     line-height:1.4;
   }
+  .btn-copy-addr{
+    flex-shrink:0;
+    font-family:var(--font-mono);
+    font-size:11px;
+    background:transparent;
+    border:1px solid var(--border, #444);
+    color:inherit;
+    border-radius:6px;
+    padding:4px 8px;
+    cursor:pointer;
+  }
+  .btn-copy-addr:active{ opacity:0.6; }
+  .btn-nav-app{
+    flex-shrink:0;
+    font-family:var(--font-mono);
+    font-size:11px;
+    font-weight:700;
+    color:#fff;
+    border:none;
+    border-radius:6px;
+    padding:6px 10px;
+    cursor:pointer;
+    text-decoration:none;
+    display:inline-block;
+  }
+  .btn-nav-app:active{ opacity:0.7; }
   .active-ride.is-warning{ border-color:#FF3D3D; animation:alert-pulse-red 1s ease-in-out infinite; }
   .active-ride.is-warning .countdown-value{ color:#FF3D3D; }
   .active-ride.is-late{ border-color:#FF3D3D; background:rgba(255,61,61,0.08); }
@@ -188,6 +247,28 @@
     border-radius:8px;
   }
   .gps-lock.is-close{border-color:var(--lime);}
+  /* Pino fixo no centro do mapa (estilo Uber/iFood): quem arrasta é o
+     mapa por baixo, o pino nunca se move na tela — sempre aponta pro
+     exato centro do quadro do mapa. */
+  .map-pin-wrap{ position:relative; }
+  .map-pin-fixed{
+    position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-100%);
+    font-size:36px; line-height:1; pointer-events:none; z-index:500;
+    filter:drop-shadow(0 3px 4px rgba(0,0,0,0.4));
+  }
+  .map-pin-shadow{
+    position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-3px);
+    width:10px; height:5px; border-radius:50%;
+    background:rgba(0,0,0,0.35); z-index:499; pointer-events:none;
+  }
+  .map-address-label{
+    margin-top:10px; padding:10px 12px; border-radius:10px;
+    background:var(--surface); border:1px solid var(--border);
+    font-size:13px; line-height:1.4; min-height:20px;
+  }
+  .map-address-label.is-warning{ border-color:var(--orange,#FF6A3D); color:var(--orange,#FF6A3D); }
   .gps-distance{
     font-family:var(--font-mono);
     font-size:12px;
@@ -353,6 +434,11 @@
     cursor:pointer;
   }
   .link-muted:hover{color:var(--text);}
+  .support-flag{
+    margin-top:10px; text-align:center; font-size:12px; font-family:var(--font-mono);
+    color:var(--orange,#FF6A3D); background:rgba(255,106,61,0.1);
+    border:1px solid var(--orange,#FF6A3D); border-radius:8px; padding:8px 10px;
+  }
 
   .existing-list{display:flex;flex-direction:column;gap:8px;}
   .existing-item{
@@ -779,76 +865,6 @@
     cursor:pointer;
   }
   .reason-btn:hover{border-color:var(--lime);}
-
-  /* Support chat */
-  .btn-support{
-    width:100%;
-    margin-top:10px;
-    background:none;
-    border:1px solid var(--amber);
-    color:var(--amber);
-    font-family:var(--font-display);
-    font-size:12px;
-    padding:12px;
-    border-radius:8px;
-    cursor:pointer;
-  }
-  .btn-support:hover{background:rgba(255,201,61,0.08);}
-  .support-badge{
-    display:inline-block;
-    min-width:16px;
-    height:16px;
-    line-height:16px;
-    text-align:center;
-    background:#FF3D3D;
-    color:#fff;
-    font-family:var(--font-mono);
-    font-size:10px;
-    border-radius:10px;
-    padding:0 4px;
-    margin-left:6px;
-  }
-  .support-messages{
-    max-height:40vh;
-    overflow-y:auto;
-    background:var(--surface-2);
-    border:1px solid var(--border);
-    border-radius:8px;
-    padding:12px;
-    margin-bottom:14px;
-    display:flex;
-    flex-direction:column;
-    gap:10px;
-  }
-  .support-empty{
-    color:var(--muted);
-    font-size:13px;
-    line-height:1.5;
-    text-align:center;
-    padding:18px 4px;
-  }
-  .support-msg{
-    max-width:85%;
-    padding:9px 12px;
-    border-radius:10px;
-  }
-  .support-msg.is-mine{
-    align-self:flex-end;
-    background:rgba(198,255,61,0.12);
-    border:1px solid rgba(198,255,61,0.35);
-  }
-  .support-msg.is-support{
-    align-self:flex-start;
-    background:var(--surface);
-    border:1px solid var(--border);
-  }
-  .support-msg-text{font-size:13.5px;line-height:1.45;white-space:pre-wrap;}
-  .support-msg-meta{
-    font-family:var(--font-mono);
-    font-size:10px;
-    color:var(--muted);
-    margin-top:5px;
-  }
   .star-row{
     display:flex;
     justify-content:center;
@@ -1013,6 +1029,32 @@
   @media (max-width:400px){
     .role-emoji{font-size:24px;}
   }
+  @media print{
+    .topbar, .no-print{ display:none !important; }
+    body{ background:#fff; }
+  }
+
+  .banner-modal-overlay{
+    position:fixed; inset:0; z-index:200;
+    background:rgba(0,0,0,0.78);
+    display:flex; align-items:center; justify-content:center;
+    padding:20px;
+  }
+  .banner-modal-box{
+    position:relative;
+    max-width:440px; width:100%;
+    border-radius:18px; overflow:hidden;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
+  .banner-modal-image{
+    display:block; width:100%; height:auto; cursor:pointer;
+  }
+  .banner-modal-close{
+    position:absolute; top:10px; right:10px; z-index:1;
+    width:32px; height:32px; border-radius:50%;
+    background:rgba(0,0,0,0.55); color:#fff; border:none;
+    font-size:16px; cursor:pointer; line-height:1;
+  }
 </style>
 </head>
 <body>
@@ -1021,69 +1063,20 @@
 <script>
 (function(){
 
-  // ---------- PWA setup (icon, manifest, service worker) ----------
-  // Everything lives inside this single file: the icon is an inline SVG,
-  // the manifest is generated and attached as a data: URI, and the
-  // service worker is registered from a Blob (best-effort — some browsers
-  // restrict Blob-based service workers, so this may silently no-op there;
-  // the "Add to Home Screen" / install behavior still works either way).
-  (function setupPWA(){
-    try{
-      const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-        <rect width="512" height="512" rx="100" fill="#101215"/>
-        <rect x="7" y="7" width="498" height="498" rx="93" fill="none" stroke="#C6FF3D" stroke-width="14"/>
-        <text x="50%" y="56%" font-size="260" text-anchor="middle" dominant-baseline="middle">🏍️</text>
-      </svg>`;
-      const iconUri = 'data:image/svg+xml,' + encodeURIComponent(iconSvg);
-
-      const link1 = document.getElementById('apple-touch-icon'); if(link1) link1.href = iconUri;
-      const link2 = document.getElementById('favicon-icon'); if(link2) link2.href = iconUri;
-
-      const manifest = {
-        name: 'Despacho — Entregas por moto',
-        short_name: 'Despacho',
-        description: 'Comércio pede a corrida, motoboy aceita — despacho de entregas por moto.',
-        start_url: location.href.split('#')[0],
-        scope: location.href.split('#')[0],
-        display: 'standalone',
-        background_color: '#101215',
-        theme_color: '#101215',
-        icons: [
-          {src: iconUri, sizes: '192x192', type: 'image/svg+xml', purpose: 'any'},
-          {src: iconUri, sizes: '512x512', type: 'image/svg+xml', purpose: 'any'},
-          {src: iconUri, sizes: '512x512', type: 'image/svg+xml', purpose: 'maskable'}
-        ]
-      };
-      const manifestUri = 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(manifest));
-      const manifestLink = document.getElementById('manifest-link');
-      if(manifestLink) manifestLink.href = manifestUri;
-
-      if('serviceWorker' in navigator){
-        const swSource = `
-          const CACHE = 'despacho-cache-v1';
-          self.addEventListener('install', e => { self.skipWaiting(); });
-          self.addEventListener('activate', e => { self.clients.claim(); });
-          self.addEventListener('fetch', e => {
-            if(e.request.method !== 'GET') return;
-            e.respondWith(
-              fetch(e.request).then(res=>{
-                caches.open(CACHE).then(c=>c.put(e.request, res.clone()));
-                return res;
-              }).catch(()=> caches.match(e.request))
-            );
-          });
-        `;
-        const blob = new Blob([swSource], {type:'application/javascript'});
-        const swUrl = URL.createObjectURL(blob);
-        navigator.serviceWorker.register(swUrl).catch(()=>{ /* not supported here — fine, app still works */ });
-      }
-    }catch(e){ console.error('Setup PWA falhou', e); }
-  })();
+  // ---------- PWA setup (service worker) ----------
+  // Icon and manifest are now real static files (/icon.svg, /manifest.json)
+  // linked directly in <head>. The service worker is registered from a
+  // real URL (/service-worker.js) — a Blob URL, as this used to do, is
+  // rejected by Chrome and Firefox per spec and never actually installed.
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+      .catch((e) => console.error('Falha ao registrar o service worker', e));
+  }
 
   // ---------- storage helpers ----------
-  // Wraps a promise so it always settles within `ms`, even if the storage
-  // bridge never responds — this is what previously made "Cadastrar" hang
-  // forever with no feedback.
+  // Wraps a promise so it always settles within `ms`, even if the network
+  // request never responds — this is what previously made things hang
+  // forever with no feedback. Still used by the fetch() calls below.
   function withTimeout(promise, ms){
     return new Promise((resolve)=>{
       let done = false;
@@ -1095,32 +1088,44 @@
       });
     });
   }
-  async function getJSON(key, shared){
-    if(!window.storage) return null;
+
+  // Device-local settings (session token, chosen API server, sound
+  // preference) live in localStorage — synchronous, and reliably kept by
+  // the browser itself across reloads, pull-to-refresh, and reopening the
+  // installed app.
+  //
+  // This used to go through window.storage instead, which only exists
+  // inside the Claude.ai Artifacts sandbox — outside of it (i.e. on this
+  // app's real, published address) it's simply undefined, so every
+  // getJSON/setJSON call silently did nothing. Nothing was ever actually
+  // being saved on a real phone, so every fresh page load (pulling down to
+  // refresh, reopening the app icon) looked exactly like being logged out.
+  function getJSON(key){
     try{
-      const r = await withTimeout(window.storage.get(key, !!shared), 3500);
-      return r ? JSON.parse(r.value) : null;
-    }catch(e){ console.error('storage.get falhou', key, e); return null; }
+      const raw = localStorage.getItem(key);
+      return Promise.resolve(raw === null ? null : JSON.parse(raw));
+    }catch(e){ console.error('localStorage.getItem falhou', key, e); return Promise.resolve(null); }
   }
-  async function setJSON(key, value, shared){
-    if(!window.storage) return false;
+  function setJSON(key, value){
     try{
-      const r = await withTimeout(window.storage.set(key, JSON.stringify(value), !!shared), 3500);
-      return !!r;
-    }catch(e){ console.error('storage.set falhou', key, e); return false; }
-  }
-  async function listKeys(prefix, shared){
-    if(!window.storage) return [];
-    try{
-      const r = await withTimeout(window.storage.list(prefix, !!shared), 3500);
-      return r ? r.keys : [];
-    }catch(e){ console.error('storage.list falhou', prefix, e); return []; }
+      if(value === null || value === undefined) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(value));
+      return Promise.resolve(true);
+    }catch(e){ console.error('localStorage.setItem falhou', key, e); return Promise.resolve(false); }
   }
   function newId(prefix){
     return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
   }
   function esc(s){
     return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  // Soma valores em dinheiro pelo total em CENTAVOS (arredondando cada parcela
+  // antes de somar), não em ponto flutuante puro — "0.1 + 0.2" no JavaScript
+  // dá 0.30000000000000004, e somar várias entregas assim pode fazer o total
+  // aparecer "faltando 1 centavo" mesmo com todo mundo correto individualmente.
+  function sumMoney(list, getter){
+    const cents = list.reduce((s,o)=> s + Math.round(((getter ? getter(o) : o) || 0) * 100), 0);
+    return cents / 100;
   }
   function formatMoney(v){
     const n = parseFloat(v)||0;
@@ -1168,10 +1173,9 @@
   }
 
   // ---------- backend API helpers ----------
-  // All shared data (businesses, motoboys, orders) now lives on your own
-  // server instead of window.storage. window.storage is still used only for
-  // the API server address and the session token — both purely local to
-  // this device/browser.
+  // All shared data (businesses, motoboys, orders) lives on your own
+  // server. localStorage is used only for the API server address and the
+  // session token — both purely local to this device/browser.
   const DEFAULT_API_BASE = 'https://despacho-backend-production-1f3a.up.railway.app';
 
   function authHeaders(){
@@ -1364,7 +1368,7 @@
   // ---------- state ----------
   let state = {
     screen: 'loading', // loading, setup, welcome, login-business, register-business, complete-business, login-motoboy, register-motoboy, complete-motoboy, business-dash, motoboy-dash
-    apiBase: '', // URL of your backend, e.g. https://despacho-api.up.railway.app
+    apiBase: '', // URL of your backend, e.g. https://chegoja-api.up.railway.app
     apiOk: null, // null=checking, true=reachable, false=couldn't reach the server
     isOffline: (typeof navigator !== 'undefined' && 'onLine' in navigator) ? !navigator.onLine : false,
     authToken: null, // session token from login/register — sent as Authorization: Bearer <token>
@@ -1381,16 +1385,15 @@
     topupPix: null, // {paymentId, qrCodeBase64, qrCode} once a Pix has been generated
     incomingAlert: null, // order object for the big banner shown to an online motoboy
     cancelModal: null, // {orderId, reason, note} while the cancel-reason sheet is open
+    supportModal: null, // {orderId, reason, note} while the support sheet is open
+    recentAddresses: [], // business only — past delivery addresses with already-confirmed pins
     rateModal: null, // {orderId, stars, comment} while the rating sheet is open
-    supportChat: null, // {orderId} while the support chat sheet is open — orderId ties it to the active ride
-    supportMessages: [], // the motoboy's own conversation with support
-    supportUnread: 0, // unread replies from support, for the button badge
-    supportDraft: '', // what they're typing, kept across re-renders
     myRatingSummary: null, // {average, count} for whoever is logged in
     historyDateFilter: 'todas', // hoje | 7dias | 30dias | todas
     historyStatusFilter: 'todas', // todas | finalizadas | canceladas | andamento
     soundPref: null, // {type:'preset', preset:'padrao'} or {type:'custom', dataUri, fileName} — motoboy's own device only
     showSoundPicker: false,
+    activeBanner: null, // the one full-screen promo banner chosen for this app open, or null
     toast: null
   };
 
@@ -1433,17 +1436,30 @@
         state.profile = me.profile;
         state.screen = me.type==='business' ? 'business-dash' : 'motoboy-dash';
         resetNotificationTracking();
+        resetNoticeTracking();
         await refreshOrders();
         await refreshMyRatingSummary();
+        await refreshRecentAddresses();
         startPolling();
         render();
+        checkBanners();
         return;
       }
       // token was rejected — clear it and fall through to a fresh welcome screen
       state.authToken = null;
       await setJSON('auth-token', null, false);
     }
-    setState({screen:'welcome'});
+    setState({screen: initialScreenFromLink()});
+  }
+
+  // Lets you send a link that skips the "quem está entrando" screen and
+  // goes straight to login/cadastro de um papel específico — ex.:
+  // /entregas.html?tipo=motoboy  ou  /entregas.html?tipo=comercio
+  function initialScreenFromLink(){
+    const tipo = new URLSearchParams(location.search).get('tipo');
+    if(tipo === 'motoboy') return 'login-motoboy';
+    if(tipo === 'comercio' || tipo === 'business') return 'login-business';
+    return 'welcome';
   }
 
   async function saveApiBase(url){
@@ -1512,7 +1528,6 @@
         state.incomingAlert = null;
       }
 
-      if(!state.supportChat) await refreshSupportUnread();
       state.orders = mine;
       state.availableOrders = available;
     } else {
@@ -1521,18 +1536,81 @@
     }
   }
 
+  // Keeps state.profile fresh (credits, blocked status, free-credits promo,
+  // in-app notices) without needing a full re-login. New unread notices get
+  // a toast + sound the same way a new order does, so nothing gets missed
+  // even for people who never granted push permission.
+  let knownNoticeIds = new Set();
+  function resetNoticeTracking(){ knownNoticeIds = new Set((state.profile && state.profile.notices || []).map(n=>n.id)); }
+  async function refreshProfile(){
+    if(!state.authToken) return;
+    const me = await apiGet('/api/me');
+    if(me.error || !me.profile) return;
+    const notices = me.profile.notices || [];
+    const freshUnread = notices.filter(n=>!n.read && !knownNoticeIds.has(n.id));
+    if(freshUnread.length && knownNoticeIds.size > 0){
+      // skip the toast on the very first load (knownNoticeIds empty) — that's just catching up, not "new"
+      freshUnread.forEach(n=>{
+        showToast((n.promo ? '🎁 ' : '📣 ') + n.title);
+      });
+      playNewOrderAlert();
+    }
+    knownNoticeIds = new Set(notices.map(n=>n.id));
+    state.profile = me.profile;
+  }
+
   function startPolling(){
     if(pollHandle) clearInterval(pollHandle);
     pollHandle = setInterval(async ()=>{
       // Don't disrupt any open form/sheet — re-rendering while the person
       // is typing would reset the field and make it look like it's blinking.
-      if(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.supportChat) return;
+      // The profile screen has its own free-text inputs (name/phone/e-mail/
+      // password) that aren't behind a modal flag, so it needs the same
+      // protection.
+      if(!canSafelyRerender()) return;
       await refreshOrders();
+      await refreshProfile();
       render();
     }, 3000);
   }
 
   // ---------- auth actions ----------
+  // Business-only: the list of past delivery addresses (each with its
+  // already-confirmed pin) used for live suggestions on the new-order form.
+  async function refreshRecentAddresses(){
+    if(state.role !== 'business' || !state.myId) return;
+    const list = await apiGet('/api/businesses/'+state.myId+'/recent-addresses');
+    state.recentAddresses = Array.isArray(list) ? list : [];
+  }
+
+  // ---------- pop-up banners (full-screen promo, one per app open) ----------
+  // The admin creates/edits these from the admin panel — nothing here is
+  // hardcoded. The server already filters by público-alvo/ativo/datas;
+  // this just picks WHICH ONE of the eligible banners to show this time,
+  // rotating through them across app opens instead of always the same one.
+  async function checkBanners(){
+    if(!state.role) return;
+    const list = await apiGet('/api/banners');
+    if(!Array.isArray(list) || !list.length) return;
+    const seenKey = 'banner-rotation-index';
+    let idx = (await getJSON(seenKey, false));
+    idx = (typeof idx === 'number' && idx >= 0) ? idx : 0;
+    const banner = list[idx % list.length];
+    await setJSON(seenKey, idx + 1, false);
+    state.activeBanner = banner;
+    render();
+  }
+
+  function openBannerLink(b){
+    if(!b || b.linkType==='none' || !b.linkValue) return;
+    if(b.linkType==='external'){
+      window.open(b.linkValue, '_blank');
+    } else {
+      // 'internal' — a relative path within the app's own site
+      window.location.href = b.linkValue;
+    }
+  }
+
   async function afterAuthSuccess(role, token, profile){
     state.authToken = token;
     await setJSON('auth-token', token, false);
@@ -1542,10 +1620,13 @@
     state.profile = profile;
     state.screen = role==='business' ? 'business-dash' : 'motoboy-dash';
     resetNotificationTracking();
+    resetNoticeTracking();
     await refreshOrders();
     await refreshMyRatingSummary();
+    await refreshRecentAddresses();
     startPolling();
     render();
+    checkBanners();
   }
 
   async function submitBusinessRegister(data){
@@ -1584,11 +1665,6 @@
 
   async function logout(){
     stopGeoWatch();
-    if(supportPollHandle){ clearInterval(supportPollHandle); supportPollHandle = null; }
-    state.supportChat = null;
-    state.supportMessages = [];
-    state.supportUnread = 0;
-    state.supportDraft = '';
     if(state.authToken){
       apiPost('/api/logout', {}).catch(()=>{}); // best-effort, don't block on it
     }
@@ -1606,16 +1682,19 @@
       pickupAddress: data.pickupAddress,
       deliveryAddress: data.deliveryAddress,
       value: data.value,
-      note: data.note
+      note: data.note,
+      deliveryCoordsOverride: data.deliveryCoordsOverride || null,
+      roundTrip: !!data.roundTrip
     });
     if(result.error){ showToast(result.error); return; }
-    setState({modal:null});
+    setState({modal:null, newOrderDeliveryCoords:null, newOrderFormSnapshot:null});
     await refreshOrders();
     render();
     showToast(result.offerQueue && result.offerQueue.length>0
       ? 'Corrida enviada para o motoboy mais disponível'
       : 'Corrida solicitada — nenhum motoboy on-line no momento'
     );
+    ensurePushSubscription('business'); // pede permissão aqui — é o momento em que a pessoa realmente quer ser avisada
   }
 
   let topupPollHandle = null;
@@ -1682,12 +1761,338 @@
     render();
     const labels = {online:'🟢 Você está on-line — recebendo corridas', pausado:'🟡 Você está pausado — não vai receber novas corridas', offline:'⚪ Você está off-line'};
     showToast(labels[newStatus]);
+    if(newStatus === 'online' && typeof pingMotoboyLocationIfOnline === 'function') pingMotoboyLocationIfOnline();
+    if(newStatus === 'online') ensurePushSubscription('motoboy');
+    if(newStatus === 'online') acquireWakeLock(); else releaseWakeLock();
   }
 
-  const ACTIVE_STATUSES = ['aceito','no_local_retirada','em_entrega','no_local_entrega'];
+  // ---------- Localização exata do comércio (mapa com pino arrastável) ----------
+  // Geocodificar o endereço digitado (Nominatim/OpenStreetMap) só chega
+  // perto do lugar certo — em ruas menores ou endereços incompletos pode
+  // errar por centenas de metros, porque o serviço está adivinhando a
+  // partir do texto, não medindo nada de verdade.
+  //
+  // Só confiar numa leitura crua do GPS também não resolve sozinho: um
+  // único fix pode vir ruim (prédio, sinal fraco, GPS "frio"). É por isso
+  // que apps como Uber/iFood pedem pro estabelecimento CONFIRMAR
+  // visualmente num mapa, arrastando um pino — uma pessoa olhando o mapa
+  // corrige o erro do sensor na hora, o que nenhuma leitura sozinha faz.
+  // Aqui usamos o GPS só como ponto de partida do mapa; quem decide onde
+  // fica o pino de verdade é o comerciante, olhando o mapa.
+  let locationPickerMap = null;
+
+  // mode: 'business' (marca a localização fixa da loja, salva no perfil) ou
+  // 'order-delivery' (marca só a coordenada de entrega desta corrida, usada
+  // uma vez na hora de criar o pedido — endereços de entrega mudam a cada
+  // corrida, então não faz sentido salvar isso permanentemente em lugar nenhum).
+  function openLocationPicker(mode){
+    state.showLocationPicker = true;
+    state.locationPickerMode = mode || 'business';
+    state.locationPickerCoords = mode === 'order-delivery'
+      ? (state.newOrderDeliveryCoords || null)
+      : ((state.profile && state.profile.preciseCoords) || null);
+    let typedAddress = '';
+    if(mode === 'order-delivery'){
+      const form = document.getElementById('form-new-order');
+      if(form){
+        const fd = new FormData(form);
+        const roundTripBox = form.querySelector('#new-order-round-trip');
+        state.newOrderFormSnapshot = {
+          pickupAddress: (fd.get('pickupAddress')||'').toString(),
+          deliveryAddress: (fd.get('deliveryAddress')||'').toString(),
+          value: (fd.get('value')||'').toString(),
+          note: (fd.get('note')||'').toString(),
+          roundTrip: !!(roundTripBox && roundTripBox.checked)
+        };
+      }
+      typedAddress = (state.newOrderFormSnapshot && state.newOrderFormSnapshot.deliveryAddress || '').trim();
+    }
+    render();
+    if(state.locationPickerCoords) return; // já tem um pino salvo — abre exatamente onde a pessoa deixou da última vez
+
+    if(mode === 'order-delivery' && typedAddress.length >= 8){
+      // Já sabemos o endereço que a pessoa digitou — geocodifica ele e já
+      // começa o pino ali, em vez de abrir o mapa vazio esperando a pessoa
+      // buscar de novo. O GPS do aparelho não ajuda aqui: é o endereço do
+      // cliente, não de quem está com o celular na mão.
+      apiGet('/api/geocode-search?q='+encodeURIComponent(typedAddress)).then(data=>{
+        const results = (data && data.results) || [];
+        if(results[0] && locationPickerMap && !state.newOrderDeliveryCoords){
+          locationPickerMap.setView([results[0].lat, results[0].lng], 17);
+          updateLocationLabelFromMapCenter();
+          if(!results[0].hasHouseNumber){
+            // O mapa aberto do OpenStreetMap não tem o número exato dessa
+            // rua cadastrado — o pino caiu perto, mas não necessariamente na
+            // porta certa. Avisa pra pessoa conferir/arrastar antes de salvar.
+            showToast('⚠️ Não achamos o número exato desse endereço — confira e ajuste o pino no mapa');
+          }
+        }
+      }).catch(()=>{ /* geocodificação falhou — a pessoa ajusta manualmente */ });
+      return;
+    }
+
+    // Localização da própria loja (mode 'business') — aí sim o GPS do
+    // aparelho é um bom ponto de partida, já que quem está segurando o
+    // celular é quem está na loja.
+    if(mode !== 'order-delivery' && navigator.geolocation){
+      navigator.geolocation.getCurrentPosition(
+        (pos)=>{
+          if(locationPickerMap){
+            locationPickerMap.setView([pos.coords.latitude, pos.coords.longitude], 17);
+            updateLocationLabelFromMapCenter();
+          }
+        },
+        ()=>{ /* sem GPS disponível — a pessoa arrasta o mapa manualmente até achar o lugar */ },
+        {enableHighAccuracy:true, maximumAge:0, timeout:10000}
+      );
+    }
+  }
+
+  function closeLocationPicker(){
+    state.showLocationPicker = false;
+    locationPickerMap = null;
+    render();
+  }
+
+  // Estilo Uber/iFood: o pino é um elemento de HTML fixo no centro da tela
+  // (não uma marca do Leaflet), e quem se move é o MAPA por baixo dele —
+  // então "onde está o pino" é sempre simplesmente o centro do mapa
+  // (map.getCenter()), sem precisar rastrear a posição de um marcador à parte.
+  let reverseGeocodeTimer = null;
+  function initLocationPickerMap(){
+    if(typeof L === 'undefined') return; // Leaflet ainda não carregou (sem internet?)
+    const start = state.locationPickerCoords || {lat:-14.235, lng:-51.9253}; // centro do Brasil, se nada melhor
+    const zoom = state.locationPickerCoords ? 17 : 4;
+    locationPickerMap = L.map('location-picker-map', {attributionControl:false}).setView([start.lat, start.lng], zoom);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(locationPickerMap);
+    locationPickerMap.on('movestart', ()=>{
+      const labelEl = document.getElementById('map-address-label');
+      if(labelEl){ labelEl.textContent = '🔄 Movendo…'; labelEl.className = 'map-address-label'; }
+    });
+    locationPickerMap.on('moveend', updateLocationLabelFromMapCenter);
+    setTimeout(()=>{ if(locationPickerMap) locationPickerMap.invalidateSize(); }, 50);
+    updateLocationLabelFromMapCenter(); // mostra o endereço do ponto inicial, sem esperar a pessoa arrastar
+  }
+
+  function updateLocationLabelFromMapCenter(){
+    if(!locationPickerMap) return;
+    clearTimeout(reverseGeocodeTimer);
+    reverseGeocodeTimer = setTimeout(async ()=>{
+      const c = locationPickerMap.getCenter();
+      const labelEl = document.getElementById('map-address-label');
+      if(!labelEl) return;
+      const data = await apiGet('/api/geocode-reverse?lat='+c.lat+'&lng='+c.lng);
+      if(!locationPickerMap) return; // o picker pode ter sido fechado enquanto a busca corria
+      if(!data || !data.label){
+        labelEl.textContent = '📍 Endereço não identificado aqui — confira no mapa se é o lugar certo mesmo assim.';
+        labelEl.className = 'map-address-label is-warning';
+      } else {
+        labelEl.textContent = '📍 ' + data.label;
+        labelEl.className = 'map-address-label' + (data.hasHouseNumber ? '' : ' is-warning');
+      }
+    }, 500);
+  }
+
+  async function saveLocationPicker(){
+    if(!locationPickerMap) return;
+    const {lat, lng} = locationPickerMap.getCenter();
+    if(state.locationPickerMode === 'order-delivery'){
+      state.newOrderDeliveryCoords = {lat, lng};
+      closeLocationPicker();
+      showToast('✅ Local de entrega marcado no mapa');
+      return;
+    }
+    const result = await apiPatch('/api/businesses/'+state.myId+'/location', {lat, lng});
+    if(result && result.error){ showToast(result.error); return; }
+    state.profile = Object.assign({}, state.profile, {preciseCoords:{lat,lng}});
+    closeLocationPicker();
+    showToast('✅ Localização exata salva — o motoboy agora mede a distância a partir daqui');
+  }
+
+  function renderLocationPickerModal(){
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.id = 'location-picker-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal-sheet">
+        <div class="modal-head">
+          <span class="modal-title">📍 Marcar localização exata</span>
+          <button class="modal-close" id="location-picker-close">✕</button>
+        </div>
+        <p class="page-sub" style="margin-bottom:12px;">Arraste o <strong>mapa</strong> até a porta certa ficar embaixo do pino (igual Uber/iFood) — ou busque o endereço abaixo.</p>
+        <div style="position:relative;margin-bottom:10px;">
+          <input type="text" id="location-picker-search" placeholder="Buscar endereço ou ponto de referência..." autocomplete="off"
+                 style="width:100%;padding:10px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--border);color:var(--text);font-size:14px;">
+          <div id="location-picker-results" style="position:absolute;top:100%;left:0;right:0;z-index:1000;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;margin-top:4px;overflow:hidden;display:none;"></div>
+        </div>
+        <div class="map-pin-wrap">
+          <div id="location-picker-map" style="width:100%;height:320px;border-radius:12px;overflow:hidden;border:1px solid var(--border);"></div>
+          <div class="map-pin-shadow"></div>
+          <div class="map-pin-fixed">📍</div>
+        </div>
+        <div class="map-address-label" id="map-address-label">🔄 Carregando…</div>
+        <div style="display:flex;gap:10px;margin-top:14px;">
+          <button type="button" class="btn-secondary" id="location-picker-cancel" style="flex:1;">Cancelar</button>
+          <button type="button" class="btn-primary" id="location-picker-save" style="flex:1;">Confirmar este local</button>
+        </div>
+      </div>
+    `;
+    return backdrop;
+  }
+
+  // ---------- sugestão de endereço no campo principal (igual Maps) ----------
+  // Duas fontes combinadas: os endereços que este comércio já usou antes
+  // (instantâneo, filtrado localmente, já vem com o pino confirmado — sem
+  // precisar geocodificar de novo) aparecem primeiro; embaixo, resultados
+  // ao vivo do mesmo buscador do mapa, pra endereços novos. Escolher
+  // qualquer um dos dois já preenche o campo E marca o pino de uma vez,
+  // sem precisar abrir o mapa manualmente — abrir o mapa continua
+  // disponível só pra ajuste fino.
+  let deliveryAddressSearchTimer = null;
+  function onDeliveryAddressInput(e){
+    const q = e.target.value;
+    clearTimeout(deliveryAddressSearchTimer);
+    const resultsEl = document.getElementById('delivery-address-suggestions');
+    if(!resultsEl) return;
+    const qNorm = (q||'').trim().toLowerCase();
+    if(!qNorm || qNorm.length < 2){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
+
+    const recentMatches = (state.recentAddresses||[])
+      .filter(a => a.address.toLowerCase().includes(qNorm))
+      .slice(0, 5)
+      .map(a => ({ label: a.address, lat: a.lat, lng: a.lng, hasHouseNumber: true, fromRecent: true }));
+
+    renderDeliverySuggestions(recentMatches); // shows recent matches immediately, no network wait
+
+    if(qNorm.length < 5) return; // too short to bother hitting the geocoder yet
+    deliveryAddressSearchTimer = setTimeout(async ()=>{
+      const data = await apiGet('/api/geocode-search?q=' + encodeURIComponent(q));
+      const liveResults = (data && data.results) || [];
+      // Skip anything that's basically the same text as a recent match already shown.
+      const recentLabels = new Set(recentMatches.map(r => r.label.toLowerCase()));
+      const fresh = liveResults
+        .filter(r => !recentLabels.has(r.label.toLowerCase()))
+        .map(r => ({ label: r.label, lat: r.lat, lng: r.lng, hasHouseNumber: r.hasHouseNumber, fromRecent: false }));
+      renderDeliverySuggestions([...recentMatches, ...fresh]);
+    }, 400);
+  }
+
+  function renderDeliverySuggestions(items){
+    const resultsEl = document.getElementById('delivery-address-suggestions');
+    if(!resultsEl) return;
+    if(!items.length){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
+    resultsEl.innerHTML = items.map((r,i) => `
+      <div class="location-search-item" data-idx="${i}" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);">
+        ${r.fromRecent ? '🕐 ' : (r.hasHouseNumber ? '' : '⚠️ ')}${esc(r.label)}
+        ${r.fromRecent ? ' <span style="color:var(--accent,#C6FF3D);font-size:11px;">(usado antes)</span>' : (r.hasHouseNumber ? '' : ' <span style="color:var(--orange,#FF6A3D);font-size:11px;">(sem número exato)</span>')}
+      </div>
+    `).join('');
+    resultsEl.style.display = 'block';
+    resultsEl.querySelectorAll('.location-search-item').forEach(el=>{
+      el.onclick = ()=>{
+        const r = items[parseInt(el.getAttribute('data-idx'),10)];
+        const addressInput = document.getElementById('new-order-delivery-address');
+        const hintEl = document.getElementById('new-order-delivery-precision');
+        if(addressInput) addressInput.value = r.label;
+        state.newOrderDeliveryCoords = {lat: r.lat, lng: r.lng};
+        if(hintEl){
+          const note = r.fromRecent
+            ? '📍 Endereço já usado antes — localização salva, sem precisar ajustar'
+            : (r.hasHouseNumber === false
+                ? '⚠️ Endereço aproximado (sem número exato) — confira o pino'
+                : '✅ Localização identificada automaticamente');
+          hintEl.innerHTML = note + ' — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>';
+          const btn = hintEl.querySelector('#btn-mark-delivery-location');
+          if(btn) btn.onclick = ()=>openLocationPicker('order-delivery');
+        }
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+      };
+    });
+  }
+
+
+  // Busca endereço (com debounce) e mostra as opções em baixo do campo do
+  // mapa — clicar numa opção só centraliza o mapa e move o pino ali; o
+  // ajuste fino continua sendo arrastar o pino, já que a busca de endereço
+  // tem o mesmo limite de precisão discutido acima.
+  let locationSearchTimer = null;
+  function onLocationSearchInput(e){
+    const q = e.target.value;
+    clearTimeout(locationSearchTimer);
+    const resultsEl = document.getElementById('location-picker-results');
+    if(!q || q.trim().length < 3){ if(resultsEl){ resultsEl.style.display='none'; resultsEl.innerHTML=''; } return; }
+    locationSearchTimer = setTimeout(async ()=>{
+      const data = await apiGet('/api/geocode-search?q=' + encodeURIComponent(q));
+      const results = (data && data.results) || [];
+      if(!resultsEl) return;
+      if(!results.length){ resultsEl.style.display='none'; resultsEl.innerHTML=''; return; }
+      resultsEl.innerHTML = results.map((r,i) => `<div class="location-search-item" data-idx="${i}" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);">${r.hasHouseNumber ? '' : '⚠️ '}${esc(r.label)}${r.hasHouseNumber ? '' : ' <span style="color:var(--orange,#FF6A3D);font-size:11px;">(sem número exato — confira o pino)</span>'}</div>`).join('');
+      resultsEl.style.display = 'block';
+      resultsEl.querySelectorAll('.location-search-item').forEach(el=>{
+        el.onclick = ()=>{
+          const r = results[parseInt(el.getAttribute('data-idx'),10)];
+          if(locationPickerMap){
+            locationPickerMap.setView([r.lat, r.lng], 17); // dispara 'moveend' sozinho, que já atualiza a etiqueta de endereço
+          }
+          resultsEl.style.display = 'none';
+          resultsEl.innerHTML = '';
+          const input = document.getElementById('location-picker-search');
+          if(input) input.value = r.label;
+        };
+      });
+    }, 400);
+  }
+
+  // Subscribes this device to receive push notifications (new ride offers)
+  // even with the phone locked or the app in the background. Only makes
+  // sense once the motoboy is online, so we call this from setMotoboyStatus
+  // above rather than at login — asking for notification permission before
+  // the person has any reason to want it just gets an automatic "no".
+  function urlBase64ToUint8Array(base64url){
+    const padding = '='.repeat((4 - base64url.length % 4) % 4);
+    const base64 = (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+  }
+
+  async function ensurePushSubscription(role){
+    try{
+      if(!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      if(Notification.permission === 'denied') return;
+
+      const cfg = await apiGet('/api/push/vapid-public-key');
+      if(!cfg || !cfg.enabled || !cfg.publicKey) return; // push not configured on the server
+
+      if(Notification.permission !== 'granted'){
+        const perm = await Notification.requestPermission();
+        if(perm !== 'granted') return;
+      }
+
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if(!sub){
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(cfg.publicKey)
+        });
+      }
+      const path = role === 'business' ? '/api/businesses/' : '/api/motoboys/';
+      await apiPost(path+state.myId+'/push-subscription', {subscription: sub.toJSON()});
+    }catch(e){
+      console.error('Falha ao ativar notificações push', e);
+    }
+  }
+
+  const ACTIVE_STATUSES = ['aceito','no_local_retirada','em_entrega','no_local_entrega','retornando','no_local_retorno'];
+  // Mirrors CANCELABLE_STATUSES on the server — once the motoboy has
+  // departed the pickup with the package ('em_entrega' onward), the
+  // cancel option disappears for both sides.
+  const CANCELABLE_STATUSES = ['pendente','aceito','no_local_retirada'];
   const OFFER_TIMEOUT_MS = 30 * 1000; // must match OFFER_TIMEOUT_MS on the server — used here only to draw the countdown
   const PICKUP_WINDOW_MS = 16 * 60 * 1000; // 16 minutes for each leg (to pickup, and to delivery)
   const ARRIVAL_RADIUS_METERS = 150; // must match ARRIVAL_RADIUS_METERS on the server
+  const MAX_ACCURACY_ALLOWANCE_METERS = 350; // must match MAX_ACCURACY_ALLOWANCE_METERS on the server
 
   function haversineMeters(lat1,lng1,lat2,lng2){
     const R = 6371000;
@@ -1771,9 +2176,25 @@
     if(!result.error) showToast('Corrida recusada');
   }
 
+  // Backing out AFTER accepting, but before picking up the package. Unlike
+  // cancelling, this keeps the ride alive — it just goes back into the
+  // queue for the next motoboy, so the business doesn't need to do anything.
+  async function giveUpOrder(orderId){
+    if(!confirm('Devolver essa corrida? Ela vai direto pro próximo motoboy da fila — o comércio não vai precisar recriar nada.')) return;
+    stopGeoWatch();
+    const result = await apiPost('/api/orders/'+orderId+'/give-up', {});
+    if(result.error){ showToast(result.error); return; }
+    await refreshOrders();
+    render();
+    showToast('Corrida devolvida — foi para o próximo motoboy da fila');
+  }
+
   async function arriveAtPickup(orderId){
     const result = await apiPost('/api/orders/'+orderId+'/arrive-pickup', {geo: liveGeo});
-    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    if(result.error){
+      await handleArrivalBlocked(result, orderId, 'arrive-pickup', arriveAtPickup);
+      return;
+    }
     stopGeoWatch();
     await refreshOrders();
     render();
@@ -1790,11 +2211,33 @@
 
   async function arriveAtDelivery(orderId){
     const result = await apiPost('/api/orders/'+orderId+'/arrive-delivery', {geo: liveGeo});
-    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    if(result.error){
+      await handleArrivalBlocked(result, orderId, 'arrive-delivery', arriveAtDelivery);
+      return;
+    }
     stopGeoWatch();
     await refreshOrders();
     render();
     showToast('Chegada no destino registrada — confirme a entrega');
+  }
+
+  // Se o servidor bloqueou por distância (GPS impreciso), oferece confirmar
+  // mesmo assim — igual Uber/iFood fazem, em vez de travar uma entrega
+  // legítima só porque o sensor teve uma leitura ruim naquele momento.
+  // Fica registrado no pedido pra conferência do admin depois.
+  async function handleArrivalBlocked(result, orderId, path, retryFn){
+    if(result.canOverride && confirm(result.error + '\n\nSe você já está no local e o problema é só o GPS, pode confirmar mesmo assim. Confirmar chegada?')){
+      const result2 = await apiPost('/api/orders/'+orderId+'/'+path, {geo: liveGeo, override:true});
+      if(result2.error){ showToast(result2.error); await refreshOrders(); render(); return; }
+      stopGeoWatch();
+      await refreshOrders();
+      render();
+      showToast('Chegada confirmada manualmente — registrado para conferência');
+      return;
+    }
+    showToast(result.error);
+    await refreshOrders();
+    render();
   }
 
   async function markDelivered(orderId){
@@ -1803,6 +2246,35 @@
     await refreshOrders();
     render();
     showToast('Entrega marcada como concluída');
+  }
+
+  // ---- Ida e volta ----
+  async function departReturn(orderId){
+    const result = await apiPost('/api/orders/'+orderId+'/depart-return', {});
+    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    await refreshOrders();
+    render();
+    showToast('Voltando para a retirada');
+  }
+
+  async function arriveAtReturn(orderId){
+    const result = await apiPost('/api/orders/'+orderId+'/arrive-return', {geo: liveGeo});
+    if(result.error){
+      await handleArrivalBlocked(result, orderId, 'arrive-return', arriveAtReturn);
+      return;
+    }
+    stopGeoWatch();
+    await refreshOrders();
+    render();
+    showToast('Chegada de volta registrada — conclua a corrida');
+  }
+
+  async function completeReturn(orderId){
+    const result = await apiPost('/api/orders/'+orderId+'/complete-return', {});
+    if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
+    await refreshOrders();
+    render();
+    showToast('Corrida concluída');
   }
 
   const CANCEL_REASONS_BUSINESS = ['Cliente desistiu','Pedido ainda não está pronto','Endereço informado está incorreto','Pedido foi enviado por outro meio','Outro motivo'];
@@ -1833,76 +2305,37 @@
     showToast('Corrida cancelada');
   }
 
-  // ---------- support chat ----------
-  let supportPollHandle = null;
-
-  async function openSupportChat(orderId, prefill){
-    state.supportChat = {orderId: orderId || null};
-    state.supportDraft = prefill || '';
-    render();
-    await refreshSupportMessages();
-    render();
-    scrollSupportToBottom();
-    if(supportPollHandle) clearInterval(supportPollHandle);
-    // Own poll while the sheet is open — the main one is paused so it
-    // doesn't wipe what the motoboy is typing.
-    supportPollHandle = setInterval(async ()=>{
-      if(!state.supportChat) return;
-      const before = state.supportMessages.length;
-      await refreshSupportMessages();
-      if(state.supportMessages.length !== before){
-        render();
-        scrollSupportToBottom();
-      }
-    }, 5000);
-  }
-
-  function closeSupportChat(){
-    if(supportPollHandle){ clearInterval(supportPollHandle); supportPollHandle = null; }
-    state.supportChat = null;
-    state.supportDraft = '';
+  // ---------- suporte (motoboy reporta um problema no meio da corrida) ----------
+  const SUPPORT_REASONS = [
+    {id:'endereco_errado', label:'Endereço/localização errada'},
+    {id:'cliente_ausente', label:'Cliente não atende / não está no local'},
+    {id:'problema_pedido', label:'Problema com o pedido'},
+    {id:'acidente_emergencia', label:'Acidente ou emergência'},
+    {id:'outro', label:'Outro'}
+  ];
+  function openSupportModal(orderId){
+    state.supportModal = {orderId, reason:null, note:''};
     render();
   }
-
-  async function refreshSupportMessages(){
-    const list = await apiGet('/api/support/messages');
-    if(list){
-      state.supportMessages = list;
-      state.supportUnread = 0; // reading the thread clears the badge, same as on the server
-    }
+  function closeSupportModal(){
+    state.supportModal = null;
+    render();
   }
-
-  // Cheap check used by the normal polling loop, so the badge updates even
-  // when the chat is closed.
-  async function refreshSupportUnread(){
-    if(state.role !== 'motoboy') return;
-    const r = await apiGet('/api/support/unread');
-    if(r && typeof r.unread === 'number') state.supportUnread = r.unread;
-  }
-
-  function scrollSupportToBottom(){
-    const box = root.querySelector('#support-messages');
-    if(box) box.scrollTop = box.scrollHeight;
-  }
-
-  async function sendSupportMessage(){
-    const text = (state.supportDraft || '').trim();
-    if(!text) return;
-    const btn = root.querySelector('#btn-send-support');
+  async function confirmSupport(){
+    const sm = state.supportModal;
+    if(!sm || !sm.reason) return;
+    const btn = root.querySelector('#btn-confirm-support');
     if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
-    const result = await apiPost('/api/support/messages', {
-      text,
-      orderId: state.supportChat ? state.supportChat.orderId : null
-    });
+    const result = await apiPost('/api/orders/'+sm.orderId+'/support', {reason: sm.reason, note: sm.note});
     if(result.error){
       showToast(result.error);
-      if(btn){ btn.disabled = false; btn.textContent = 'Enviar'; }
+      if(btn){ btn.disabled = false; btn.textContent = 'Avisar o suporte'; }
       return;
     }
-    state.supportDraft = '';
-    await refreshSupportMessages();
+    state.supportModal = null;
+    await refreshOrders();
     render();
-    scrollSupportToBottom();
+    showToast('✅ Suporte avisado — alguém vai te ajudar em breve');
   }
 
   function openRateModal(orderId){
@@ -1976,7 +2409,9 @@
     else if(state.screen==='complete-motoboy') main.appendChild(renderCompleteMotoboy());
     else if(state.screen==='business-dash') main.appendChild(renderBusinessDash());
     else if(state.screen==='statement') main.appendChild(renderStatement());
+    else if(state.screen==='invoice') main.appendChild(renderInvoice());
     else if(state.screen==='profile') main.appendChild(renderProfile());
+    else if(state.screen==='notices') main.appendChild(renderNotices());
     else if(state.screen==='history-business') main.appendChild(renderHistoryBusiness());
     else if(state.screen==='history-motoboy') main.appendChild(renderHistoryMotoboy());
     else if(state.screen==='motoboy-dash') main.appendChild(renderMotoboyDash());
@@ -1999,6 +2434,10 @@
       root.appendChild(renderIncomingAlertBanner(state.incomingAlert));
     }
 
+    if(state.activeBanner){
+      root.appendChild(renderBannerModal(state.activeBanner));
+    }
+
     if(state.modal==='new-order'){
       root.appendChild(renderNewOrderModal());
     }
@@ -2008,14 +2447,18 @@
     if(state.cancelModal){
       root.appendChild(renderCancelModal());
     }
+    if(state.supportModal){
+      root.appendChild(renderSupportModal());
+    }
     if(state.showSoundPicker){
       root.appendChild(renderSoundPickerModal());
     }
-    if(state.supportChat){
-      root.appendChild(renderSupportChatModal());
-    }
     if(state.rateModal){
       root.appendChild(renderRateModal());
+    }
+    if(state.showLocationPicker){
+      root.appendChild(renderLocationPickerModal());
+      initLocationPickerMap();
     }
     if(state.toast){
       const t = document.createElement('div');
@@ -2034,14 +2477,17 @@
     if(state.profile){
       const statusDots = {online:' 🟢', pausado:' 🟡', offline:' ⚪'};
       const statusDot = state.role==='motoboy' ? statusDots[motoboyStatus()] : '';
+      const roleIcon = state.role==='business' ? '🏬' : '🏍️';
+      const unreadCount = ((state.profile.notices)||[]).filter(n=>!n.read).length;
       right = `
-        <span class="role-chip" id="btn-open-profile" style="cursor:pointer;">${state.role==='business'?'🏬':'🏍️'} ${esc(state.profile.name)}${statusDot}</span>
+        <button class="btn-ghost" id="btn-open-notices" style="position:relative;">🔔${unreadCount>0?`<span class="notice-dot">${unreadCount>9?'9+':unreadCount}</span>`:''}</button>
+        <span class="role-chip" id="btn-open-profile" style="cursor:pointer;">${roleIcon} ${esc(state.profile.name)}${statusDot}</span>
         <button class="btn-ghost" id="btn-logout">Sair</button>
       `;
     }
     bar.innerHTML = `
       <div class="brand">
-        <span class="brand-mark">DESPACHO</span>
+        <span class="brand-mark">CHEGOJÁ</span>
         <span class="brand-tag">entregas por moto</span>
       </div>
       <div class="topbar-right">${right}</div>
@@ -2090,6 +2536,7 @@
     `;
     return d;
   }
+
 
   function authField(label, name, type, placeholder){
     return `
@@ -2219,6 +2666,39 @@
     return d;
   }
 
+  function renderNotices(){
+    const d = document.createElement('div');
+    const isBusiness = state.role==='business';
+    const notices = ((state.profile && state.profile.notices) || []).slice();
+    d.innerHTML = `
+      <p class="eyebrow">Avisos</p>
+      <h1 class="page-title">🔔 Avisos e promoções</h1>
+      ${notices.length ? notices.map(n=>`
+        <div class="notice-item ${n.read?'':'unread'}">
+          <div class="notice-item-title">${n.promo?'🎁 ':'📣 '}${esc(n.title)}</div>
+          <div class="notice-item-body">${esc(n.body)}</div>
+          <div class="notice-item-date">${formatDateTime(n.createdAt)}</div>
+        </div>
+      `).join('') : `
+        <div class="empty-state">
+          <span class="empty-state-emoji">🔕</span>
+          <div class="empty-state-text">Nenhum aviso por aqui ainda.</div>
+        </div>
+      `}
+      <div style="margin-top:22px;"><button class="btn-secondary" data-goto="${isBusiness?'business-dash':'motoboy-dash'}">← Voltar</button></div>
+    `;
+    return d;
+  }
+
+  async function markNoticesRead(){
+    if(!state.profile) return;
+    const endpoint = state.role==='business'
+      ? '/api/businesses/'+state.myId+'/notices/read-all'
+      : '/api/motoboys/'+state.myId+'/notices/read-all';
+    const result = await apiPost(endpoint, {});
+    if(!result.error) state.profile = result;
+  }
+
   function renderProfile(){
     const d = document.createElement('div');
     const p = state.profile;
@@ -2301,6 +2781,11 @@
       <p class="eyebrow">Financeiro</p>
       <h1 class="page-title">Extrato</h1>
       <p class="page-sub" style="font-family:var(--font-mono);font-size:12px;">Saldo atual: ${formatCredits(state.profile.credits||0)}</p>
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        <button class="btn-secondary" data-open-invoice="hoje">Resumo de hoje</button>
+        <button class="btn-secondary" data-open-invoice="semana">Resumo — 7 dias</button>
+        <button class="btn-secondary" data-open-invoice="mes">Resumo — 30 dias</button>
+      </div>
       <div id="statement-list"></div>
       <div style="margin-top:22px;"><button class="btn-secondary" data-goto="business-dash">← Voltar</button></div>
     `;
@@ -2323,6 +2808,61 @@
         list.appendChild(row);
       });
     }
+    return d;
+  }
+
+  async function openInvoice(period){
+    state.invoice = null;
+    state.invoicePeriod = period;
+    setState({screen:'invoice'});
+    const result = await apiGet('/api/businesses/'+state.myId+'/invoice?period='+period);
+    if(result.error){ showToast(result.error); setState({screen:'statement'}); return; }
+    state.invoice = result;
+    render();
+  }
+
+  function renderInvoice(){
+    const d = document.createElement('div');
+    const inv = state.invoice;
+    if(!inv){
+      d.innerHTML = `<p class="page-sub">Carregando…</p>`;
+      return d;
+    }
+    const rows = inv.orders.map(o => `
+      <tr>
+        <td>${formatDateTime(o.deliveredAt)}</td>
+        <td>${esc(o.pickupAddress)} → ${esc(o.deliveryAddress)}</td>
+        <td style="text-align:right;">${formatCredits(o.value)}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:16px 0;">Nenhuma entrega concluída nesse período.</td></tr>`;
+
+    d.innerHTML = `
+      <div class="no-print" style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="btn-secondary" data-goto="statement">← Voltar</button>
+        <button class="btn-primary" id="btn-print-invoice">🖨️ Salvar / Imprimir</button>
+      </div>
+      <div id="invoice-paper" style="background:#fff;color:#111;padding:24px;border-radius:12px;font-family:Arial,Helvetica,sans-serif;">
+        <h2 style="margin:0 0 4px;">${esc(inv.business.name)}</h2>
+        <p style="margin:0 0 16px;font-size:12px;color:#555;">${esc(inv.business.email||'')}${inv.business.phone?' · '+esc(inv.business.phone):''}${inv.business.address?' · '+esc(inv.business.address):''}</p>
+        <h3 style="margin:0 0 2px;">Resumo de entregas — ${esc(inv.rangeLabel)}</h3>
+        <p style="margin:0 0 16px;font-size:11px;color:#888;">Gerado em ${formatDateTime(inv.generatedAt)} · documento interno, sem valor fiscal</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid #ddd;text-align:left;">
+              <th style="padding:6px 4px;">Data/hora</th>
+              <th style="padding:6px 4px;">Trajeto</th>
+              <th style="padding:6px 4px;text-align:right;">Valor motoboy</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="margin-top:18px;border-top:2px solid #ddd;padding-top:12px;font-size:13px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Entregas concluídas</span><strong>${inv.totals.deliveredCount}</strong></div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Total pago aos motoboys</span><strong>${formatCredits(inv.totals.totalPaidToMotoboys)}</strong></div>
+          <div style="display:flex;justify-content:space-between;font-size:15px;margin-top:8px;"><span>Total gasto em créditos da plataforma</span><strong>${formatCredits(inv.totals.totalCreditsSpent)}</strong></div>
+        </div>
+      </div>
+    `;
     return d;
   }
 
@@ -2362,7 +2902,7 @@
     const allOrders = state.orders.filter(o => o.businessId === state.myId);
     const concluidas = allOrders.filter(o=>o.status==='entregue');
     const canceladas = allOrders.filter(o=>o.status==='cancelado');
-    const totalGasto = concluidas.reduce((s,o)=>s+o.value,0);
+    const totalGasto = sumMoney(concluidas, o=>o.value);
 
     d.innerHTML = `
       <p class="eyebrow">Histórico</p>
@@ -2402,10 +2942,10 @@
     const entregues = allOrders.filter(o=>o.status==='entregue');
     const hojeStart = startOfToday(), weekStart = startOfWeek(), monthStart = startOfMonth();
     const concluidasHoje = entregues.filter(o=>o.deliveredAt>=hojeStart);
-    const ganhoHoje = concluidasHoje.reduce((s,o)=>s+o.value,0);
-    const ganhoSemana = entregues.filter(o=>o.deliveredAt>=weekStart).reduce((s,o)=>s+o.value,0);
-    const ganhoMes = entregues.filter(o=>o.deliveredAt>=monthStart).reduce((s,o)=>s+o.value,0);
-    const ganhoTotal = entregues.reduce((s,o)=>s+o.value,0);
+    const ganhoHoje = sumMoney(concluidasHoje, o=>o.value);
+    const ganhoSemana = sumMoney(entregues.filter(o=>o.deliveredAt>=weekStart), o=>o.value);
+    const ganhoMes = sumMoney(entregues.filter(o=>o.deliveredAt>=monthStart), o=>o.value);
+    const ganhoTotal = sumMoney(entregues, o=>o.value);
 
     d.innerHTML = `
       <p class="eyebrow">Meus ganhos</p>
@@ -2456,15 +2996,23 @@
 
     const pendentes = ativas.filter(o=>o.status==='pendente').length;
     const aCaminho = ativas.filter(o=>ACTIVE_STATUSES.includes(o.status)).length;
-    const gasto = finalizadas.reduce((s,o)=>s+o.value,0);
+    const gasto = sumMoney(finalizadas, o=>o.value);
     const credits = state.profile.credits || 0;
 
     d.innerHTML = `
       <p class="eyebrow">Painel do comércio</p>
       <h1 class="page-title">${esc(state.profile.name)}</h1>
       <p class="page-sub" style="font-family:var(--font-mono);font-size:12px;">📍 ${esc(state.profile.address)}</p>
+      <p class="page-sub" style="font-size:12px;margin-top:-8px;">
+        ${state.profile.preciseCoords
+          ? '✅ Localização exata marcada — <button id="btn-mark-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>'
+          : '⚠️ Localização aproximada (baseada no endereço digitado) — <button id="btn-mark-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar localização exata</button>'}
+      </p>
       <div style="margin-bottom:16px;">${ratingBadgeHtml()}</div>
-      <div class="credit-card ${credits<=0?'is-empty':''}">
+      ${state.profile.freeCreditsEffective ? `
+      <div class="free-credits-banner">🎁 Créditos grátis ativos${state.profile.freeCredits && state.profile.freeCredits.until ? ' até '+formatDateTime(state.profile.freeCredits.until).split(',')[0] : ''} — suas entregas não estão descontando crédito agora.</div>
+      ` : ''}
+      <div class="credit-card ${(credits<=0 && !state.profile.freeCreditsEffective)?'is-empty':''}">
         <div class="credit-label">Créditos disponíveis (1 crédito = 1 entrega)</div>
         <div class="credit-value">${formatCredits(credits)}</div>
         <button class="btn-topup" id="btn-open-topup">+ Adicionar créditos</button>
@@ -2502,19 +3050,42 @@
     return d;
   }
 
+  let lastKnownActiveOrderId = null;
   function renderMotoboyDash(){
     const d = document.createElement('div');
     const curStatus = motoboyStatus();
+
+    if(state.profile.approved === false){
+      d.innerHTML = `
+        <p class="eyebrow">Painel do motoboy</p>
+        <h1 class="page-title">${esc(state.profile.name)}</h1>
+        <div class="active-ride is-parked" style="margin-top:16px;">
+          <div class="active-ride-head"><span class="active-ride-label">⏳ Cadastro em análise</span></div>
+          <p class="page-sub" style="margin-top:8px;">Seu cadastro foi recebido e está aguardando aprovação. Assim que for aprovado, você já poderá ficar on-line e começar a receber corridas.</p>
+        </div>
+      `;
+      return d;
+    }
+
     const online = curStatus === 'online';
     const disponiveis = state.availableOrders || [];
     const allMine = state.orders || []; // refreshOrders already keeps only this motoboy's own (non-pendente) orders
     const ativa = allMine.filter(o=>ACTIVE_STATUSES.includes(o.status));
     const finalizadas = allMine.filter(o=>o.status==='entregue');
     const canceladas = allMine.filter(o=>o.status==='cancelado');
-    const ganho = finalizadas.reduce((s,o)=>s+o.value,0);
+    const ganho = sumMoney(finalizadas, o=>o.value);
     // Only one active ride at a time.
     const activeOrder = ativa[0] || null;
     if(!activeOrder) stopGeoWatch();
+
+    // If the ride that WAS active a moment ago just vanished, and we're now
+    // in a forced pause, it's because the pickup window expired — the
+    // background job on the server took it back. Say so explicitly instead
+    // of just letting it silently disappear (which would look like a bug).
+    if(!activeOrder && lastKnownActiveOrderId && state.profile && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()){
+      showToast('⏰ Você perdeu essa corrida por não chegar a tempo na retirada — pausa automática de 10 min');
+    }
+    lastKnownActiveOrderId = activeOrder ? activeOrder.id : null;
 
     d.innerHTML = `
       <p class="eyebrow">Painel do motoboy</p>
@@ -2526,7 +3097,9 @@
         <button class="status-btn is-pausado ${curStatus==='pausado'?'active':''}" data-set-status="pausado">🟡 Pausado</button>
         <button class="status-btn is-offline ${curStatus==='offline'?'active':''}" data-set-status="offline">⚪ Off-line</button>
       </div>
-      ${curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
+      ${curStatus==='pausado' && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()
+        ? `<div class="field-hint" style="margin-bottom:16px;color:#FF6A6A;">⏸️ Pausa automática: você perdeu a última corrida por não chegar a tempo na retirada. Você volta a poder ficar on-line <span id="forced-pause-countdown" data-until="${state.profile.forcedPauseUntil}">em instantes</span>.</div>`
+        : curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
       ${activeOrder ? '' : `<button class="btn-secondary" id="btn-open-sound-picker" style="margin-bottom:20px;">🔊 Som de aviso: ${esc(soundPrefLabel())}</button>`}
       ${activeOrder ? renderActiveRideBanner(activeOrder) : ''}
       <div class="stat-strip">
@@ -2601,14 +3174,40 @@
     `;
   }
 
+  // Renders an address line with a "copiar" button next to it, so the
+  // motoboy can paste it straight into whatever GPS app they actually use
+  // (Waze, Google Maps, etc) instead of retyping it by hand.
+  function renderAddressLine(address, coords){
+    const attr = esc(address).replace(/"/g, '&quot;');
+    // Prefer the actual pin coordinates over the text address — that's the
+    // whole point of having a confirmed pin (address text alone is what
+    // caused the "cai no lugar errado" problem in the first place).
+    const mapsUrl = coords
+      ? 'https://www.google.com/maps/dir/?api=1&destination=' + coords.lat + ',' + coords.lng + '&travelmode=driving'
+      : 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(address) + '&travelmode=driving';
+    const wazeUrl = coords
+      ? 'https://waze.com/ul?ll=' + coords.lat + ',' + coords.lng + '&navigate=yes'
+      : 'https://waze.com/ul?q=' + encodeURIComponent(address) + '&navigate=yes';
+    return `<div class="active-ride-addr" style="display:flex;flex-direction:column;gap:8px;">
+      <span>📍 ${esc(address)}</span>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <a href="${mapsUrl}" target="_blank" rel="noopener" class="btn-nav-app" style="background:#1a73e8;">🗺️ Google Maps</a>
+        <a href="${wazeUrl}" target="_blank" rel="noopener" class="btn-nav-app" style="background:#33ccff;color:#04243d;">🧭 Waze</a>
+        <button type="button" class="btn-copy-addr" data-copy-address="${attr}" title="Copiar endereço">📋 Copiar</button>
+      </div>
+    </div>`;
+  }
+
   function renderActiveRideBanner(o){
     const cancelLink = `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-cancel="${o.id}">Cancelar corrida</span></div>`;
-    // Support is reachable from every stage of an active ride. On the final
-    // "dar baixa" stage it gets a full-width button instead of a small link,
-    // since that's where a motoboy is most likely to be stuck.
-    const badge = state.supportUnread > 0 ? `<span class="support-badge">${state.supportUnread}</span>` : '';
-    const supportLink = `<div style="text-align:center;margin-top:8px;"><span class="link-muted" data-open-support="${o.id}">💬 Falar com o suporte${badge}</span></div>`;
-    const supportButton = `<button class="btn-support" data-open-support="${o.id}" data-support-prefill="1">💬 Tive um problema para concluir${badge}</button>`;
+    const giveUpLink = `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-give-up="${o.id}">Devolver corrida (não posso mais fazer)</span></div>`;
+    // Some kind of problem happened DURING the delivery (wrong address,
+    // customer unreachable, accident...) — different from give-up/cancel,
+    // which only make sense before the package is picked up. This just
+    // flags it for the support team; it doesn't resolve anything by itself.
+    const supportLink = o.support && o.support.status === 'aberto'
+      ? `<div class="support-flag">⚠️ Suporte avisado — aguardando retorno</div>`
+      : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>`;
     if(o.status === 'aceito'){
       return `
         <div class="active-ride" id="active-ride-banner">
@@ -2617,10 +3216,10 @@
             <span class="countdown-value" id="countdown-timer" data-start-at="${o.acceptedAt}">16:00</span>
           </div>
           <div class="active-ride-sub">até a retirada</div>
-          <div class="active-ride-addr">📍 ${esc(o.pickupAddress)}</div>
+          ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
           ${renderGpsLock(o, 'pickupCoords', 'pickup', 'data-arrive-pickup', '📍 Cheguei na retirada')}
+          ${giveUpLink}
           ${supportLink}
-          ${cancelLink}
         </div>
       `;
     }
@@ -2631,11 +3230,11 @@
           <div class="active-ride-head">
             <span class="active-ride-label">📦 Na retirada</span>
           </div>
-          <div class="active-ride-addr">📍 ${esc(o.pickupAddress)}</div>
+          ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
           <div class="active-ride-hint">Colete o pedido e toque em sair quando estiver pronto.</div>
           <button class="btn-stage" data-depart="${o.id}">🚀 Saí para a entrega</button>
-          ${supportLink}
           ${cancelLink}
+          ${supportLink}
         </div>
       `;
     }
@@ -2647,24 +3246,62 @@
             <span class="countdown-value" id="countdown-timer" data-start-at="${o.departedAt}">16:00</span>
           </div>
           <div class="active-ride-sub">até a entrega</div>
-          <div class="active-ride-addr">📍 ${esc(o.deliveryAddress)}</div>
+          ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
           ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei na entrega')}
           ${supportLink}
-          ${cancelLink}
         </div>
       `;
     }
-    // no_local_entrega — no cancel option here, delivery is effectively done
+    if(o.status === 'no_local_entrega'){
+      stopGeoWatch();
+      if(o.roundTrip){
+        return `
+          <div class="active-ride is-parked" id="active-ride-banner">
+            <div class="active-ride-head">
+              <span class="active-ride-label">🏁 No destino</span>
+            </div>
+            ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
+            <div class="active-ride-hint">🔁 Essa corrida é ida e volta. Entregue/pegue o que for necessário e toque em voltar quando estiver pronto.</div>
+            <button class="btn-stage" style="width:100%;margin-top:10px;" data-depart-return="${o.id}">🔁 Voltar para a retirada</button>
+            ${supportLink}
+          </div>
+        `;
+      }
+      return `
+        <div class="active-ride is-parked" id="active-ride-banner">
+          <div class="active-ride-head">
+            <span class="active-ride-label">🏁 No destino</span>
+          </div>
+          ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
+          <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
+          <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
+          ${supportLink}
+        </div>
+      `;
+    }
+    if(o.status === 'retornando'){
+      return `
+        <div class="active-ride" id="active-ride-banner">
+          <div class="active-ride-head">
+            <span class="active-ride-label">🔁 Voltando para a retirada</span>
+          </div>
+          ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
+          ${renderGpsLock(o, 'pickupCoords', 'return', 'data-arrive-return', '📍 Cheguei de volta')}
+          ${supportLink}
+        </div>
+      `;
+    }
+    // no_local_retorno — corrida de ida e volta, última etapa
     stopGeoWatch();
     return `
       <div class="active-ride is-parked" id="active-ride-banner">
         <div class="active-ride-head">
-          <span class="active-ride-label">🏁 No destino</span>
+          <span class="active-ride-label">🔁 De volta na retirada</span>
         </div>
-        <div class="active-ride-addr">📍 ${esc(o.deliveryAddress)}</div>
-        <div class="active-ride-hint">Entregue o pedido e confirme abaixo.</div>
-        <button class="btn-deliver" style="width:100%;margin-top:10px;" data-deliver="${o.id}">✅ Confirmar entrega</button>
-        ${supportButton}
+        ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
+        <div class="active-ride-hint">Chegou de volta — confirme para concluir a corrida.</div>
+        <button class="btn-deliver" style="width:100%;margin-top:10px;" data-complete-return="${o.id}">✅ Concluir corrida</button>
+        ${supportLink}
       </div>
     `;
   }
@@ -2675,6 +3312,8 @@
     if(status==='no_local_retirada') return `<span class="ticket-badge badge-aceito">Na retirada</span>`;
     if(status==='em_entrega') return `<span class="ticket-badge badge-aceito">A caminho da entrega</span>`;
     if(status==='no_local_entrega') return `<span class="ticket-badge badge-aceito">No destino</span>`;
+    if(status==='retornando') return `<span class="ticket-badge badge-aceito">🔁 Voltando</span>`;
+    if(status==='no_local_retorno') return `<span class="ticket-badge badge-aceito">🔁 De volta na retirada</span>`;
     if(status==='cancelado') return `<span class="ticket-badge badge-cancelado">Cancelada</span>`;
     return `<span class="ticket-badge badge-entregue">Entregue</span>`;
   }
@@ -2702,12 +3341,16 @@
           <button class="btn-cancel" data-decline="${o.id}">Recusar</button>
           <button class="btn-accept" data-accept="${o.id}">Aceitar corrida</button>
         </div>`;
-    } else if(mode==='motoboy-mine' && ACTIVE_STATUSES.includes(o.status)){
+    } else if(mode==='motoboy-mine' && CANCELABLE_STATUSES.includes(o.status)){
       actions = `<div class="ticket-actions">
         <a class="call-link" style="flex:1;text-align:center;" href="tel:${esc(o.businessPhone)}">📞 ${esc(o.businessName)}</a>
         <button class="btn-cancel" data-open-cancel="${o.id}">Cancelar</button>
       </div>`;
-    } else if(mode==='business' && (o.status==='pendente' || ACTIVE_STATUSES.includes(o.status))){
+    } else if(mode==='motoboy-mine' && ACTIVE_STATUSES.includes(o.status)){
+      actions = `<div class="ticket-actions">
+        <a class="call-link" style="flex:1;text-align:center;" href="tel:${esc(o.businessPhone)}">📞 ${esc(o.businessName)}</a>
+      </div>`;
+    } else if(mode==='business' && (o.status==='pendente' || CANCELABLE_STATUSES.includes(o.status))){
       actions = `<div class="ticket-actions">
         <button class="btn-cancel" data-open-cancel="${o.id}">Cancelar corrida</button>
       </div>`;
@@ -2758,6 +3401,22 @@
     return el;
   }
 
+  // Full-screen promo pop-up — single image, created/edited entirely from
+  // the admin panel. Tapping the image follows the banner's own link (if
+  // any); the X just dismisses it for this app open.
+  function renderBannerModal(b){
+    const wrap = document.createElement('div');
+    wrap.className = 'banner-modal-overlay';
+    wrap.id = 'banner-modal-overlay';
+    wrap.innerHTML = `
+      <div class="banner-modal-box">
+        <button class="banner-modal-close" id="banner-modal-close">✕</button>
+        <img class="banner-modal-image" id="banner-modal-image" src="${esc(b.imageUrl)}" alt="">
+      </div>
+    `;
+    return wrap;
+  }
+
   function renderIncomingAlertBanner(o){
     const wrap = document.createElement('div');
     wrap.className = 'incoming-alert';
@@ -2781,6 +3440,15 @@
     const backdrop = document.createElement('div');
     backdrop.className='modal-backdrop';
     backdrop.id='modal-backdrop';
+    // Preserva o que a pessoa já tinha digitado se este modal está sendo
+    // re-renderizado (ex: depois de fechar o mapa de ajuste de entrega) —
+    // sem isso, reabrir o formulário do zero apagaria tudo que já foi
+    // preenchido.
+    const snap = state.newOrderFormSnapshot || {};
+    const vPickup = snap.pickupAddress !== undefined ? snap.pickupAddress : state.profile.address;
+    const vDelivery = snap.deliveryAddress || '';
+    const vValue = snap.value || '';
+    const vNote = snap.note || '';
     backdrop.innerHTML = `
       <div class="modal-sheet">
         <div class="modal-head">
@@ -2790,20 +3458,32 @@
         <form id="form-new-order" novalidate>
           <div class="field">
             <label>Endereço de retirada</label>
-            <textarea name="pickupAddress">${esc(state.profile.address)}</textarea>
+            <textarea name="pickupAddress">${esc(vPickup)}</textarea>
           </div>
           <div class="field">
             <label>Endereço de entrega</label>
-            <textarea name="deliveryAddress" placeholder="Rua, número, bairro, cidade"></textarea>
+            <div style="position:relative;">
+              <textarea name="deliveryAddress" id="new-order-delivery-address" placeholder="Rua, número, bairro, cidade" autocomplete="off">${esc(vDelivery)}</textarea>
+              <div id="delivery-address-suggestions" style="position:absolute;top:100%;left:0;right:0;z-index:1000;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;margin-top:4px;overflow:hidden;display:none;max-height:260px;overflow-y:auto;"></div>
+            </div>
+            <div class="field-hint" id="new-order-delivery-precision">
+              ${state.newOrderDeliveryCoords
+                ? '✅ Localização exata marcada nesse mapa — <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">ajustar pino</button>'
+                : '💡 Comece a digitar — vai aparecer sugestão, inclusive de endereços já usados antes. Ou <button type="button" id="btn-mark-delivery-location" style="background:none;border:none;padding:0;font-size:12px;color:var(--accent,#C6FF3D);text-decoration:underline;cursor:pointer;">marcar local exato no mapa</button> na mão.'}
+            </div>
           </div>
           <div class="field">
             <label>Valor que o motoboy vai receber (R$)</label>
-            <input type="number" name="value" step="0.01" min="0" placeholder="15.00">
+            <input type="number" name="value" step="0.01" min="0" placeholder="15.00" value="${esc(vValue)}">
             <div class="field-hint">💡 Isso é só o que o motoboy recebe — essa corrida sempre consome 1 crédito do seu saldo, não importa esse valor.</div>
           </div>
           <div class="field">
             <label>Observações (opcional)</label>
-            <textarea name="note" placeholder="Ex: entregar na portaria, pedido embalado, etc"></textarea>
+            <textarea name="note" placeholder="Ex: entregar na portaria, pedido embalado, etc">${esc(vNote)}</textarea>
+          </div>
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px;">
+            <input type="checkbox" id="new-order-round-trip" name="roundTrip" ${snap.roundTrip ? 'checked' : ''} style="width:auto;">
+            <label for="new-order-round-trip" style="margin:0;font-size:13px;">🔁 Ida e volta (o motoboy espera e retorna com algo)</label>
           </div>
           <button type="button" id="btn-submit-order" class="btn-primary">Chamar motoboy</button>
         </form>
@@ -2866,39 +3546,6 @@
     return backdrop;
   }
 
-  function renderSupportChatModal(){
-    const backdrop = document.createElement('div');
-    backdrop.className='modal-backdrop';
-    backdrop.id='support-backdrop';
-    const msgs = state.supportMessages || [];
-    const tiedOrderId = state.supportChat && state.supportChat.orderId;
-
-    const messagesHtml = msgs.length === 0
-      ? `<div class="support-empty">Nenhuma mensagem ainda.<br>Escreva abaixo que o suporte responde por aqui mesmo.</div>`
-      : msgs.map(m => `
-          <div class="support-msg ${m.fromType==='motoboy'?'is-mine':'is-support'}">
-            <div class="support-msg-text">${esc(m.text)}</div>
-            <div class="support-msg-meta">${m.fromType==='motoboy'?'Você':'Suporte'} · ${formatDateTime(m.createdAt)}</div>
-          </div>
-        `).join('');
-
-    backdrop.innerHTML = `
-      <div class="modal-sheet">
-        <div class="modal-head">
-          <span class="modal-title">💬 Suporte</span>
-          <button class="modal-close" id="support-close">✕</button>
-        </div>
-        ${tiedOrderId ? `<div class="field-hint" style="margin-top:-6px;margin-bottom:12px;">Vinculado à entrega #${esc(tiedOrderId.slice(-6).toUpperCase())} — o suporte já vê de qual corrida você está falando.</div>` : ''}
-        <div class="support-messages" id="support-messages">${messagesHtml}</div>
-        <div class="field" style="margin-bottom:10px;">
-          <textarea id="support-input" placeholder="Descreva o que está acontecendo…">${esc(state.supportDraft||'')}</textarea>
-        </div>
-        <button type="button" class="btn-primary" id="btn-send-support">Enviar</button>
-      </div>
-    `;
-    return backdrop;
-  }
-
   function renderCancelModal(){
     const cm = state.cancelModal;
     const backdrop = document.createElement('div');
@@ -2940,6 +3587,50 @@
           <div class="ticket-actions">
             <button class="btn-secondary" id="btn-cancel-back-reason">Voltar</button>
             <button class="btn-cancel-confirm" id="btn-confirm-cancel">Confirmar cancelamento</button>
+          </div>
+        </div>
+      `;
+    }
+    return backdrop;
+  }
+
+  function renderSupportModal(){
+    const sm = state.supportModal;
+    const backdrop = document.createElement('div');
+    backdrop.className='modal-backdrop';
+    backdrop.id='support-backdrop';
+
+    if(!sm.reason){
+      // Passo 1: qual o problema.
+      backdrop.innerHTML = `
+        <div class="modal-sheet">
+          <div class="modal-head">
+            <span class="modal-title">⚠️ O que aconteceu?</span>
+            <button class="modal-close" id="support-close">✕</button>
+          </div>
+          <p class="page-sub" style="margin-bottom:14px;">Isso avisa nosso suporte — não cancela nem encerra a corrida sozinho, alguém vai te orientar em seguida.</p>
+          <div class="reason-list">
+            ${SUPPORT_REASONS.map(r => `<button class="reason-btn" data-pick-support-reason="${r.id}">${esc(r.label)}</button>`).join('')}
+          </div>
+        </div>
+      `;
+    } else {
+      // Passo 2: observação opcional + confirmação.
+      const label = (SUPPORT_REASONS.find(r=>r.id===sm.reason)||{}).label || sm.reason;
+      backdrop.innerHTML = `
+        <div class="modal-sheet">
+          <div class="modal-head">
+            <span class="modal-title">Confirmar aviso ao suporte</span>
+            <button class="modal-close" id="support-close">✕</button>
+          </div>
+          <p class="page-sub" style="margin-bottom:14px;">Motivo: <strong style="color:var(--text);">${esc(label)}</strong></p>
+          <div class="field">
+            <label>Detalhes (opcional)</label>
+            <textarea id="support-note" placeholder="Conte rapidamente o que está acontecendo">${esc(sm.note||'')}</textarea>
+          </div>
+          <div class="ticket-actions">
+            <button class="btn-secondary" id="btn-support-back-reason">Voltar</button>
+            <button class="btn-cancel-confirm" id="btn-confirm-support">Avisar o suporte</button>
           </div>
         </div>
       `;
@@ -3026,6 +3717,12 @@
       elm.onclick = ()=>setState({screen: elm.getAttribute('data-goto')});
     });
 
+    root.querySelectorAll('[data-open-invoice]').forEach(elm=>{
+      elm.onclick = ()=>openInvoice(elm.getAttribute('data-open-invoice'));
+    });
+    const printInvoiceBtn = $('#btn-print-invoice');
+    if(printInvoiceBtn) printInvoiceBtn.onclick = ()=>window.print();
+
     const logoutBtn = $('#btn-logout');
     if(logoutBtn) logoutBtn.onclick = logout;
 
@@ -3077,9 +3774,14 @@
 
     const btnOpenProfile = $('#btn-open-profile');
     if(btnOpenProfile) btnOpenProfile.onclick = ()=>setState({screen:'profile'});
+    const btnOpenNotices = $('#btn-open-notices');
+    if(btnOpenNotices) btnOpenNotices.onclick = ()=>{
+      setState({screen:'notices'});
+      markNoticesRead();
+    };
 
     const btnNewOrder = $('#btn-new-order');
-    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order'});
+    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderFormSnapshot:null});
 
     const modalClose = $('#modal-close');
     if(modalClose) modalClose.onclick = ()=>setState({modal:null});
@@ -3088,6 +3790,12 @@
 
     const btnOpenTopup = $('#btn-open-topup');
     if(btnOpenTopup) btnOpenTopup.onclick = ()=>{ state.showTopup=true; state.topupPix=null; render(); };
+    const btnMarkLocation = $('#btn-mark-location');
+    if(btnMarkLocation) btnMarkLocation.onclick = ()=>openLocationPicker('business');
+    const btnMarkDeliveryLocation = $('#btn-mark-delivery-location');
+    if(btnMarkDeliveryLocation) btnMarkDeliveryLocation.onclick = ()=>openLocationPicker('order-delivery');
+    const deliveryAddressInput = $('#new-order-delivery-address');
+    if(deliveryAddressInput) deliveryAddressInput.oninput = onDeliveryAddressInput;
     const btnOpenStatement = $('#btn-open-statement');
     if(btnOpenStatement) btnOpenStatement.onclick = openStatement;
 
@@ -3106,10 +3814,22 @@
     root.querySelectorAll('[data-hfilter-status]').forEach(elm=>{
       elm.onclick = ()=>setState({historyStatusFilter: elm.getAttribute('data-hfilter-status')});
     });
+
     const topupClose = $('#topup-close');
     if(topupClose) topupClose.onclick = closeTopup;
     const topupBackdrop = $('#topup-backdrop');
     if(topupBackdrop) topupBackdrop.onclick = (e)=>{ if(e.target===topupBackdrop) closeTopup(); };
+
+    const locationPickerClose = $('#location-picker-close');
+    if(locationPickerClose) locationPickerClose.onclick = closeLocationPicker;
+    const locationPickerCancel = $('#location-picker-cancel');
+    if(locationPickerCancel) locationPickerCancel.onclick = closeLocationPicker;
+    const locationPickerSave = $('#location-picker-save');
+    if(locationPickerSave) locationPickerSave.onclick = saveLocationPicker;
+    const locationPickerBackdrop = $('#location-picker-backdrop');
+    if(locationPickerBackdrop) locationPickerBackdrop.onclick = (e)=>{ if(e.target===locationPickerBackdrop) closeLocationPicker(); };
+    const locationPickerSearch = $('#location-picker-search');
+    if(locationPickerSearch) locationPickerSearch.oninput = onLocationSearchInput;
 
     const btnGeneratePix = $('#btn-generate-pix');
     if(btnGeneratePix) btnGeneratePix.onclick = ()=>{
@@ -3152,7 +3872,7 @@
         }
         btnSubmitOrder.disabled = true;
         btnSubmitOrder.textContent = 'Enviando…';
-        createOrder({ pickupAddress, deliveryAddress, value, note: fd.get('note') });
+        createOrder({ pickupAddress, deliveryAddress, value, note: fd.get('note'), deliveryCoordsOverride: state.newOrderDeliveryCoords, roundTrip: fd.get('roundTrip') === 'on' });
       }catch(err){
         console.error('Falha ao criar corrida', err);
         showToast('Deu um erro ao solicitar. Tenta de novo.');
@@ -3194,11 +3914,44 @@
     const alertDismiss = $('#incoming-alert-dismiss');
     if(alertDismiss) alertDismiss.onclick = ()=>setState({incomingAlert:null});
 
+    const bannerClose = $('#banner-modal-close');
+    if(bannerClose) bannerClose.onclick = (e)=>{ e.stopPropagation(); setState({activeBanner:null}); };
+    const bannerImage = $('#banner-modal-image');
+    if(bannerImage) bannerImage.onclick = ()=>{ openBannerLink(state.activeBanner); setState({activeBanner:null}); };
+
     root.querySelectorAll('[data-accept]').forEach(elm=>{
       elm.onclick = ()=>acceptOrder(elm.getAttribute('data-accept'));
     });
     root.querySelectorAll('[data-decline]').forEach(elm=>{
       elm.onclick = ()=>declineOrder(elm.getAttribute('data-decline'));
+    });
+    root.querySelectorAll('[data-give-up]').forEach(elm=>{
+      elm.onclick = ()=>giveUpOrder(elm.getAttribute('data-give-up'));
+    });
+    root.querySelectorAll('[data-copy-address]').forEach(elm=>{
+      elm.onclick = async ()=>{
+        const address = elm.getAttribute('data-copy-address');
+        let copied = false;
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          try{ await navigator.clipboard.writeText(address); copied = true; }catch(e){ copied = false; }
+        }
+        if(!copied){
+          // Fallback for browsers/contexts where the Clipboard API is
+          // blocked (e.g. no HTTPS, older WebViews): select + execCommand.
+          try{
+            const ta = document.createElement('textarea');
+            ta.value = address;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            copied = document.execCommand('copy');
+            document.body.removeChild(ta);
+          }catch(e){ copied = false; }
+        }
+        showToast(copied ? '📋 Endereço copiado — cole no seu app de GPS' : 'Não consegui copiar automaticamente — selecione o texto manualmente');
+      };
     });
     root.querySelectorAll('[data-arrive-pickup]').forEach(elm=>{
       elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Registrando…'; arriveAtPickup(elm.getAttribute('data-arrive-pickup')); };
@@ -3211,6 +3964,15 @@
     });
     root.querySelectorAll('[data-deliver]').forEach(elm=>{
       elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Confirmando…'; markDelivered(elm.getAttribute('data-deliver')); };
+    });
+    root.querySelectorAll('[data-depart-return]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Saindo…'; departReturn(elm.getAttribute('data-depart-return')); };
+    });
+    root.querySelectorAll('[data-arrive-return]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Registrando…'; arriveAtReturn(elm.getAttribute('data-arrive-return')); };
+    });
+    root.querySelectorAll('[data-complete-return]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; elm.textContent = 'Concluindo…'; completeReturn(elm.getAttribute('data-complete-return')); };
     });
     root.querySelectorAll('[data-open-cancel]').forEach(elm=>{
       elm.onclick = ()=>openCancelModal(elm.getAttribute('data-open-cancel'));
@@ -3230,24 +3992,21 @@
     if(btnConfirmCancel) btnConfirmCancel.onclick = confirmCancel;
 
     root.querySelectorAll('[data-open-support]').forEach(elm=>{
-      elm.onclick = ()=>{
-        const orderId = elm.getAttribute('data-open-support');
-        // The button on the "dar baixa" stage starts the message for them,
-        // since that's the specific problem it's there to report.
-        const prefill = elm.getAttribute('data-support-prefill')
-          ? 'Estou com um problema para concluir esta entrega: '
-          : '';
-        openSupportChat(orderId, prefill);
-      };
+      elm.onclick = ()=>openSupportModal(elm.getAttribute('data-open-support'));
     });
     const supportClose = $('#support-close');
-    if(supportClose) supportClose.onclick = closeSupportChat;
+    if(supportClose) supportClose.onclick = closeSupportModal;
     const supportBackdrop = $('#support-backdrop');
-    if(supportBackdrop) supportBackdrop.onclick = (e)=>{ if(e.target===supportBackdrop) closeSupportChat(); };
-    const supportInput = $('#support-input');
-    if(supportInput) supportInput.oninput = (e)=>{ state.supportDraft = e.target.value; };
-    const btnSendSupport = $('#btn-send-support');
-    if(btnSendSupport) btnSendSupport.onclick = sendSupportMessage;
+    if(supportBackdrop) supportBackdrop.onclick = (e)=>{ if(e.target===supportBackdrop) closeSupportModal(); };
+    root.querySelectorAll('[data-pick-support-reason]').forEach(elm=>{
+      elm.onclick = ()=>{ state.supportModal.reason = elm.getAttribute('data-pick-support-reason'); render(); };
+    });
+    const supportBackReason = $('#btn-support-back-reason');
+    if(supportBackReason) supportBackReason.onclick = ()=>{ state.supportModal.reason = null; render(); };
+    const supportNoteField = $('#support-note');
+    if(supportNoteField) supportNoteField.oninput = (e)=>{ state.supportModal.note = e.target.value; };
+    const btnConfirmSupport = $('#btn-confirm-support');
+    if(btnConfirmSupport) btnConfirmSupport.onclick = confirmSupport;
 
     root.querySelectorAll('[data-open-rate]').forEach(elm=>{
       elm.onclick = ()=>openRateModal(elm.getAttribute('data-open-rate'));
@@ -3300,6 +4059,23 @@
       oel.textContent = remaining + 's';
     });
 
+    // Forced-pause countdown — shows the motoboy how long is left on the
+    // automatic 10-minute pause applied after missing a pickup window.
+    const pauseEl = root.querySelector('#forced-pause-countdown');
+    if(pauseEl){
+      const until = parseInt(pauseEl.getAttribute('data-until'), 10);
+      const remainingMs = until - Date.now();
+      if(remainingMs <= 0){
+        pauseEl.textContent = 'agora mesmo — atualize a página se ainda aparecer pausado';
+        if(state.profile) refreshOrders().then(render);
+      } else {
+        const totalSec = Math.ceil(remainingMs/1000);
+        const mm = String(Math.floor(totalSec/60)).padStart(2,'0');
+        const ss = String(totalSec%60).padStart(2,'0');
+        pauseEl.textContent = 'em ' + mm + ':' + ss;
+      }
+    }
+
     // GPS arrival lock — updates the live distance readout and enables the
     // "Cheguei" button only once the motoboy is within ARRIVAL_RADIUS_METERS.
     const gpsLock = root.querySelector('.gps-lock');
@@ -3321,12 +4097,18 @@
         if(btn) btn.disabled = true;
       } else {
         const dist = Math.round(haversineMeters(liveGeo.lat, liveGeo.lng, lat, lng));
-        if(dist <= ARRIVAL_RADIUS_METERS){
+        // Mirror the server's tolerance: the confirm-arrival endpoint accepts
+        // up to ARRIVAL_RADIUS_METERS + the device's own reported accuracy
+        // (capped) — a phone with a rough GPS fix would otherwise show the
+        // button as disabled here even though the server would accept it.
+        const accuracyAllowance = Math.min(typeof liveGeo.acc === 'number' ? liveGeo.acc : 0, MAX_ACCURACY_ALLOWANCE_METERS);
+        const effectiveRadius = ARRIVAL_RADIUS_METERS + accuracyAllowance;
+        if(dist <= effectiveRadius){
           distEl.innerHTML = '✅ Você está perto (' + dist + 'm) — pode confirmar';
           gpsLock.classList.add('is-close');
           if(btn) btn.disabled = false;
         } else {
-          distEl.innerHTML = '📍 Você está a <strong>' + dist + 'm</strong> — chegue a menos de ' + ARRIVAL_RADIUS_METERS + 'm para confirmar';
+          distEl.innerHTML = '📍 Você está a <strong>' + dist + 'm</strong> — chegue a menos de ' + effectiveRadius + 'm para confirmar' + (accuracyAllowance > 0 ? ' <span style="opacity:.7">(seu GPS está com ' + Math.round(liveGeo.acc) + 'm de precisão)</span>' : '');
           gpsLock.classList.remove('is-close');
           if(btn) btn.disabled = true;
         }
@@ -3339,10 +4121,16 @@
   document.addEventListener('click', ensureAudio);
   document.addEventListener('touchstart', ensureAudio, {passive:true});
 
+  // Mobile networks flip on/off constantly (WiFi<->dados, sinal fraco, tela
+  // trocando de app e voltando) — this shared check keeps any of those
+  // events from rebuilding the screen (and wiping whatever's being typed)
+  // while a form, modal, or the profile screen is open.
+  const canSafelyRerender = () => !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile');
+
   // Mobile browsers throttle background tabs — catch up the moment the
   // app becomes visible/foreground again instead of waiting for the next tick.
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState === 'visible' && state.profile && !(state.modal || state.showTopup || state.cancelModal || state.showSoundPicker || state.rateModal || state.supportChat)){
+    if(document.visibilityState === 'visible' && state.profile && canSafelyRerender()){
       refreshOrders().then(render);
     }
   });
@@ -3350,17 +4138,17 @@
   // Real "sem internet" detection — separate from "servidor fora do ar".
   window.addEventListener('offline', ()=>{
     state.isOffline = true;
-    render();
+    if(canSafelyRerender()) render();
   });
   window.addEventListener('online', async ()=>{
     state.isOffline = false;
-    render();
+    if(canSafelyRerender()) render();
     state.apiOk = await apiSelfTest();
     if(state.apiOk){
       showToast('🌐 Conexão restabelecida');
       if(state.profile) await refreshOrders();
     }
-    render();
+    if(canSafelyRerender()) render();
   });
 
   // While the server looks unreachable, keep quietly retrying in the
@@ -3372,9 +4160,81 @@
     if(wasDown && state.apiOk){
       showToast('✅ Conexão com o servidor restabelecida');
       if(state.profile) await refreshOrders();
-      render();
+      if(canSafelyRerender()) render();
     }
   }, 15000);
+
+  // ---------- background location ping (online motoboys only) ----------
+  // Separate from the arrival-lock GPS watch above: this one lets the
+  // server know roughly where each online motoboy is, so a new ride can be
+  // offered to whoever's actually closest to the pickup address, and so
+  // the admin panel can show a live pin. Still a single fresh fix per
+  // round (not a continuous watch) — enableHighAccuracy stays off on
+  // purpose, that's a battery/GPS-warm-up cost with no upside for a
+  // "roughly where are they" ping. What we improve here instead is
+  // rejecting bad readings rather than forwarding every single one blindly:
+  //
+  // 1) Readings worse than PING_MAX_ACCEPTABLE_ACCURACY_M are dropped —
+  //    they're too coarse (cell-tower/wifi guesses) to be worth showing.
+  // 2) A jump that implies an impossible speed since the last accepted fix
+  //    is dropped too (classic GPS glitch/teleport). Elapsed time is part
+  //    of that math, so a genuinely large gap (e.g. the app was
+  //    backgrounded for a while) doesn't get flagged — only a jump that's
+  //    too big for the time that actually passed.
+  const PING_MAX_ACCEPTABLE_ACCURACY_M = 300;
+  const PING_MAX_PLAUSIBLE_SPEED_MS = 41.7; // ~150 km/h, generous ceiling for a moto
+  let lastAcceptedPing = null; // {lat, lng, ts}
+
+  function pingMotoboyLocationIfOnline(){
+    if(state.role !== 'motoboy' || motoboyStatus() !== 'online') return;
+    if(!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const acc = Math.round(pos.coords.accuracy);
+        if(acc > PING_MAX_ACCEPTABLE_ACCURACY_M) return; // too imprecise, skip this round
+
+        const now = Date.now();
+        const lat = pos.coords.latitude, lng = pos.coords.longitude;
+        if(lastAcceptedPing){
+          const elapsedS = Math.max(1, (now - lastAcceptedPing.ts) / 1000);
+          const impliedSpeed = haversineMeters(lastAcceptedPing.lat, lastAcceptedPing.lng, lat, lng) / elapsedS;
+          if(impliedSpeed > PING_MAX_PLAUSIBLE_SPEED_MS) return; // likely a glitch, skip and try again next round
+        }
+        lastAcceptedPing = {lat, lng, ts: now};
+        apiPatch('/api/motoboys/'+state.myId, {lat, lng, acc}).catch(()=>{});
+      },
+      ()=>{ /* permission denied or unavailable — silently skip this round */ },
+      {enableHighAccuracy:false, maximumAge:15000, timeout:10000}
+    );
+  }
+  setInterval(pingMotoboyLocationIfOnline, 20000);
+  pingMotoboyLocationIfOnline(); // also fire once right away after load/login
+
+  // ---------- keep the screen awake while online ----------
+  // The background ping above only runs while the browser considers this
+  // tab/app "active" — the moment the screen locks, Android suspends it.
+  // The Wake Lock API can't stop the motoboy from switching to another
+  // app (Waze/Maps), but it does stop the single biggest accidental cause
+  // of gaps: the screen dimming and locking on its own while the app is
+  // still the one in front.
+  let wakeLock = null;
+  async function acquireWakeLock(){
+    try{
+      if('wakeLock' in navigator){
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    }catch(e){ /* not available on this device/browser — ping just runs less reliably */ }
+  }
+  function releaseWakeLock(){
+    if(wakeLock){ try{ wakeLock.release(); }catch(e){} wakeLock = null; }
+  }
+  document.addEventListener('visibilitychange', () => {
+    // The lock is auto-released whenever the tab is hidden; re-request it
+    // when the motoboy comes back while still online.
+    if(document.visibilityState === 'visible' && state.role === 'motoboy' && motoboyStatus() === 'online'){
+      acquireWakeLock();
+    }
+  });
 })();
 </script>
 </body>
