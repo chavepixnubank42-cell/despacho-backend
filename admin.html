@@ -160,6 +160,7 @@
   // putting it in state would trigger a full re-render loop on every pan.
   let liveMap = null;
   let liveMapMarkers = [];
+  let liveMapMarkersById = {};
 
   function esc(s){
     return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -374,6 +375,7 @@
     liveMap = L.map(container, {attributionControl:false});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(liveMap);
     liveMapMarkers = [];
+    liveMapMarkersById = {};
 
     if(tracked.length){
       const bounds = [];
@@ -384,6 +386,7 @@
         }).addTo(liveMap);
         marker.bindPopup(`<strong>${esc(m.name)}</strong><br>${esc(m.vehicle||'')}<br>Precisão: ${acc!=null?acc+'m':'?'}<br>Atualizado ${formatDateTime(m.lastLocation.updatedAt)}`);
         liveMapMarkers.push(marker);
+        liveMapMarkersById[m.id] = marker;
         bounds.push([lat,lng]);
       });
       if(prevView){
@@ -673,6 +676,13 @@
         (Date.now() - (m.lastLocation.updatedAt||0)) <= LOCATION_FRESHNESS_MS
       );
       body = `
+        <div class="field" style="max-width:320px;margin-bottom:12px;">
+          <label>Achar um motoboy no mapa</label>
+          <select id="map-motoboy-select">
+            <option value="">Selecione…</option>
+            ${tracked.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
+          </select>
+        </div>
         <div class="map-legend">
           <span><span class="map-dot" style="background:var(--ok);"></span> On-line com localização recente</span>
           <span style="color:var(--muted);">${tracked.length} de ${(state.motoboys||[]).filter(m=>m.status==='online').length} motoboy(s) on-line aparecendo no mapa agora</span>
@@ -917,10 +927,12 @@
           <div class="modal-box">
             <h2>${m.id ? '🖼️ Editar banner' : '🖼️ Novo banner'}</h2>
             <div class="field">
-              <label>URL da imagem (o banner inteiro é essa imagem)</label>
-              <input class="edit-input" id="banner-imageUrl" value="${esc(m.imageUrl||'')}" placeholder="https://...">
+              <label>Imagem do banner (o banner inteiro é essa imagem)</label>
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" id="banner-image-file">
+              <div id="banner-upload-status" class="row-sub" style="margin-top:4px;"></div>
+              <input type="hidden" id="banner-imageUrl" value="${esc(m.imageUrl||'')}">
             </div>
-            ${m.imageUrl ? `<img src="${esc(m.imageUrl)}" style="width:100%;border-radius:10px;margin-bottom:14px;border:1px solid var(--border);">` : ''}
+            <img id="banner-image-preview" src="${esc(m.imageUrl||'')}" style="width:100%;border-radius:10px;margin-bottom:14px;border:1px solid var(--border);${m.imageUrl?'':'display:none;'}">
             <div class="field">
               <label>Público-alvo</label>
               <select class="edit-input" id="banner-audience">
@@ -1013,7 +1025,17 @@
     } else {
       const logoutBtn = document.getElementById('btn-logout');
       if(logoutBtn) logoutBtn.onclick = logout;
-      if(state.tab === 'mapa') renderLiveMap();
+      if(state.tab === 'mapa'){
+        renderLiveMap();
+        const mapSelect = document.getElementById('map-motoboy-select');
+        if(mapSelect) mapSelect.onchange = ()=>{
+          const marker = liveMapMarkersById[mapSelect.value];
+          if(marker && liveMap){
+            liveMap.setView(marker.getLatLng(), 16);
+            marker.openPopup();
+          }
+        };
+      }
       root.querySelectorAll('[data-tab]').forEach(el=>{
         el.onclick = async ()=>{
           state.tab = el.getAttribute('data-tab');
@@ -1191,6 +1213,28 @@
           bannerLinkValueField.style.display = bannerLinkTypeSelect.value==='none' ? 'none' : '';
         };
       }
+      const bannerImageFile = document.getElementById('banner-image-file');
+      if(bannerImageFile) bannerImageFile.onchange = async ()=>{
+        const file = bannerImageFile.files && bannerImageFile.files[0];
+        if(!file) return;
+        const statusEl = document.getElementById('banner-upload-status');
+        if(statusEl) statusEl.textContent = 'Enviando…';
+        const reader = new FileReader();
+        reader.onload = async ()=>{
+          const result = await api('POST', '/api/admin/banners/upload-image', {dataUrl: reader.result});
+          if(result.error){
+            if(statusEl) statusEl.textContent = '❌ ' + result.error;
+            return;
+          }
+          const hiddenInput = document.getElementById('banner-imageUrl');
+          const preview = document.getElementById('banner-image-preview');
+          if(hiddenInput) hiddenInput.value = result.url;
+          if(preview){ preview.src = result.url; preview.style.display = ''; }
+          if(statusEl) statusEl.textContent = '✓ Imagem enviada';
+          if(state.bannerModal) state.bannerModal.imageUrl = result.url;
+        };
+        reader.readAsDataURL(file);
+      };
       const confirmBanner = document.getElementById('btn-confirm-banner');
       if(confirmBanner) confirmBanner.onclick = ()=>{
         const m = state.bannerModal;

@@ -36,9 +36,12 @@ const path = require('path');
 // deploy builds a fresh container from what's in GitHub, which does NOT
 // include data.json (it's generated at runtime) — so without a
 // persistent volume, businesses/motoboys/credits get wiped on every
-// deploy. Set DATA_DIR to a Railway Volume's mount path (e.g. /data) to
-// fix that. Defaults to this folder so nothing changes for local use.
-const DATA_DIR = process.env.DATA_DIR || __dirname;
+// deploy. Attaching a Railway Volume to this service automatically sets
+// RAILWAY_VOLUME_MOUNT_PATH — we use that first, so nothing extra needs
+// to be configured by hand. DATA_DIR still works too, if set explicitly
+// (takes priority — useful for local testing or a different host).
+// Defaults to this folder (no persistence) so nothing changes for local use.
+const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
 const DB_PATH = path.join(DATA_DIR, 'data.json');
 const TMP_PATH = DB_PATH + '.tmp';
 const BAK_PATH = DB_PATH + '.bak';
@@ -137,4 +140,4 @@ function saveDB(db) {
   return writeQueue;
 }
 
-module.exports = { loadDB, saveDB };
+module.exports = { loadDB, saveDB, DATA_DIR };

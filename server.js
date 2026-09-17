@@ -4,11 +4,15 @@ const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 const webpush = require('web-push');
-const { loadDB, saveDB } = require('./db');
+const fs = require('fs');
+const { loadDB, saveDB, DATA_DIR } = require('./db');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Default body limit (100kb) is too small for banner images sent as
+// base64 (see /api/admin/banners/upload-image below) — bumped to 8mb,
+// generous enough for a compressed banner image with room to spare.
+app.use(express.json({ limit: '8mb' }));
 
 const ACTIVE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega', 'retornando', 'no_local_retorno'];
 // Once the motoboy has departed the pickup with the package in hand
@@ -812,6 +816,43 @@ app.get('/api/banners', requireAuth('motoboy', 'business'), (req, res) => {
     .filter((b) => !b.endAt || b.endAt >= now)
     .sort((a, b) => (b.priority || 0) - (a.priority || 0));
   res.json(list);
+});
+
+// Banner image upload — the admin picks a file, the browser reads it as
+// base64 and posts it here as plain JSON (no multipart/form-data library
+// needed). Saved under DATA_DIR/uploads, which lives on the same
+// persistent Volume as data.json, so uploaded banners survive redeploys
+// too. Served back out by the /uploads/:file route right below.
+const UPLOADS_DIR = require('path').join(DATA_DIR, 'uploads');
+try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) { /* already exists */ }
+
+const ALLOWED_IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+const MAX_UPLOAD_BYTES = 6 * 1024 * 1024; // 6MB
+
+app.post('/api/admin/banners/upload-image', requireAuth('admin'), (req, res) => {
+  const { dataUrl } = req.body || {};
+  if (typeof dataUrl !== 'string') return res.status(400).json({ error: 'Nenhuma imagem enviada' });
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+  if (!match) return res.status(400).json({ error: 'Formato de imagem inválido' });
+  const mimeType = match[1];
+  const ext = ALLOWED_IMAGE_TYPES[mimeType];
+  if (!ext) return res.status(400).json({ error: 'Use uma imagem JPG, PNG, WEBP ou GIF' });
+  const buffer = Buffer.from(match[2], 'base64');
+  if (buffer.length > MAX_UPLOAD_BYTES) return res.status(400).json({ error: 'Imagem muito grande (máximo 6MB)' });
+  const filename = uuidv4() + '.' + ext;
+  fs.writeFile(require('path').join(UPLOADS_DIR, filename), buffer, (err) => {
+    if (err) return res.status(500).json({ error: 'Erro ao salvar a imagem' });
+    res.json({ url: '/uploads/' + filename });
+  });
+});
+
+app.get('/uploads/:filename', (req, res) => {
+  // Filename is always one we generated ourselves (uuid + known
+  // extension), but sanitize anyway before touching the filesystem.
+  const safe = require('path').basename(req.params.filename);
+  res.sendFile(require('path').join(UPLOADS_DIR, safe), (err) => {
+    if (err) res.status(404).end();
+  });
 });
 
 
