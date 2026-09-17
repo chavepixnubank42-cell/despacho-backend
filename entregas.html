@@ -1049,6 +1049,12 @@
   .banner-modal-box-small{
     max-width:260px;
   }
+  .banner-modal-box-mini{
+    max-width:150px;
+  }
+  .banner-modal-box-mini .banner-modal-close{
+    width:22px; height:22px; font-size:11px; top:6px; right:6px;
+  }
   .banner-modal-image{
     display:block; width:100%; height:auto; cursor:pointer;
   }
@@ -3423,7 +3429,7 @@
     wrap.className = 'banner-modal-overlay';
     wrap.id = 'banner-modal-overlay';
     wrap.innerHTML = `
-      <div class="banner-modal-box${b.size==='pequeno'?' banner-modal-box-small':''}">
+      <div class="banner-modal-box${b.size==='pequeno'?' banner-modal-box-small':(b.size==='mini'?' banner-modal-box-mini':'')}">
         <button class="banner-modal-close" id="banner-modal-close">✕</button>
         <img class="banner-modal-image" id="banner-modal-image" src="${esc(b.imageUrl)}" alt="">
       </div>

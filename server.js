@@ -739,7 +739,7 @@ app.patch('/api/admin/motoboys/:id/details', requireAuth('admin'), (req, res) =>
 // ---------------------------------------------------------------
 const BANNER_AUDIENCES = ['motoboy', 'business', 'both'];
 const BANNER_LINK_TYPES = ['none', 'external', 'internal'];
-const BANNER_SIZES = ['grande', 'pequeno'];
+const BANNER_SIZES = ['grande', 'pequeno', 'mini'];
 
 function sanitizeBannerInput(body, existing) {
   const b = existing ? Object.assign({}, existing) : {};
