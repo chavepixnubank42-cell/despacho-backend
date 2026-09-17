@@ -1,0 +1,1286 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ChegouJá — Painel administrativo</title>
+<style>
+  :root{
+    --bg:#0B0B0F;
+    --card:#15151B;
+    --border:#2A2A33;
+    --text:#F2F2F2;
+    --muted:#8A8A95;
+    --lime:#C6FF3D;
+    --danger:#FF6A6A;
+    --warn:#FFD166;
+    --ok:#4CD964;
+    --font-mono: 'Courier New', monospace;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+  }
+  .wrap{ max-width:720px; margin:0 auto; padding:24px 18px 60px; }
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:24px;
+  }
+  .brand{ font-family:var(--font-mono); font-weight:700; letter-spacing:1px; }
+  .brand-tag{ display:block; font-size:11px; color:var(--muted); font-weight:400; letter-spacing:0; }
+  .eyebrow{ color:var(--lime); font-family:var(--font-mono); font-size:12px; text-transform:uppercase; letter-spacing:1px; margin:0 0 6px; }
+  h1{ margin:0 0 18px; font-size:24px; }
+  .field{ margin-bottom:14px; }
+  .field label{ display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .field input{
+    width:100%; padding:12px 14px; border-radius:10px;
+    background:var(--card); border:1px solid var(--border); color:var(--text); font-size:15px;
+  }
+  .btn{
+    display:inline-block; padding:12px 18px; border-radius:10px; border:none;
+    background:var(--lime); color:#0B0B0F; font-weight:700; cursor:pointer; font-size:15px;
+  }
+  .btn:disabled{ opacity:0.5; cursor:default; }
+  .btn-ghost{
+    background:transparent; border:1px solid var(--border); color:var(--text);
+    padding:8px 14px; border-radius:8px; cursor:pointer; font-size:13px;
+  }
+  .btn-danger{ border-color:var(--danger); color:var(--danger); }
+  .btn-ok{ border-color:var(--ok); color:var(--ok); }
+  .error-box{ color:var(--danger); font-size:13px; margin-top:10px; min-height:16px; }
+  .tabs{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+  .tab{
+    padding:8px 14px; border-radius:20px; border:1px solid var(--border);
+    background:transparent; color:var(--muted); cursor:pointer; font-size:13px;
+  }
+  .tab.active{ background:var(--lime); color:#0B0B0F; border-color:var(--lime); font-weight:700; }
+  .grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:6px; }
+  .stat{ border:1px solid var(--border); border-radius:10px; padding:14px; background:var(--card); }
+  .stat-value{ display:block; font-size:22px; font-weight:700; }
+  .stat-label{ display:block; font-size:11px; color:var(--muted); margin-top:4px; }
+  .row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border:1px solid var(--border); border-radius:10px; padding:12px 14px;
+    margin-bottom:10px; background:var(--card);
+  }
+  .row-main{ flex:1; min-width:0; }
+  .row-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+  .row-actions{ display:flex; flex-direction:column; gap:6px; align-items:stretch; flex-shrink:0; }
+  .badge{ font-size:10px; border:1px solid var(--border); border-radius:6px; padding:1px 6px; margin-left:4px; }
+  .badge.blocked{ color:var(--danger); border-color:var(--danger); }
+  .badge.pending{ color:var(--warn); border-color:var(--warn); }
+  .empty{ color:var(--muted); font-size:14px; }
+  .loading{ color:var(--muted); font-size:14px; }
+  .edit-input{
+    padding:8px 10px; border-radius:8px; background:var(--bg);
+    border:1px solid var(--border); color:var(--text); font-size:13px;
+  }
+  #toast{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+    background:#1F1F27; border:1px solid var(--border); color:var(--text);
+    padding:10px 16px; border-radius:10px; font-size:13px; opacity:0; transition:opacity .2s;
+    pointer-events:none; max-width:90vw; text-align:center;
+  }
+  #toast.show{ opacity:1; }
+  .select-row{ display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .select-row label{ font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .row-checkbox{ width:18px; height:18px; flex-shrink:0; accent-color:var(--lime); cursor:pointer; }
+  .bulk-bar{
+    position:sticky; top:0; z-index:5; display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+    background:#1B1B22; border:1px solid var(--lime); border-radius:10px; padding:10px 12px; margin-bottom:14px;
+  }
+  .bulk-bar .count{ font-size:12px; color:var(--lime); font-family:var(--font-mono); margin-right:auto; }
+  .badge.free{ color:var(--ok); border-color:var(--ok); }
+  .field textarea{
+    width:100%; padding:12px 14px; border-radius:10px; resize:vertical; min-height:90px;
+    background:var(--card); border:1px solid var(--border); color:var(--text); font-size:14px; font-family:inherit;
+  }
+  .field select{
+    width:100%; padding:12px 14px; border-radius:10px;
+    background:var(--card); border:1px solid var(--border); color:var(--text); font-size:15px;
+  }
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:20;
+    display:flex; align-items:center; justify-content:center; padding:16px;
+  }
+  .modal-box{
+    background:var(--bg); border:1px solid var(--border); border-radius:14px;
+    padding:20px; width:100%; max-width:420px; max-height:88vh; overflow-y:auto;
+  }
+  .modal-box h2{ margin:0 0 14px; font-size:17px; }
+  .msg-history-item{ border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:10px; background:var(--card); }
+  .msg-history-item .row-sub{ margin-top:4px; }
+  #live-map{ width:100%; height:60vh; min-height:360px; border-radius:14px; border:1px solid var(--border); }
+  .map-legend{ display:flex; gap:14px; flex-wrap:wrap; margin:10px 0 14px; font-size:12px; color:var(--muted); }
+  .map-legend span{ display:inline-flex; align-items:center; gap:5px; }
+  .map-dot{ width:9px; height:9px; border-radius:50%; display:inline-block; }
+  .banner-thumb{ width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--border); flex-shrink:0; }
+</style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<div id="toast"></div>
+<script>
+(function(){
+  // Same-origin API — this file is served by the same backend it manages.
+  const API_BASE = '';
+  const TOKEN_KEY = 'despacho-admin-token';
+
+  let state = {
+    token: localStorage.getItem(TOKEN_KEY) || null,
+    screen: 'login',
+    loginError: '',
+    loginBusy: false,
+    tab: 'resumo',
+    summary: null,
+    businesses: [],
+    motoboys: [],
+    orders: [],
+    reportPeriod: 'semana',
+    report: null,
+    editingId: null, // id of the business/motoboy row currently showing its edit form (only one at a time)
+    selectedBusinessIds: new Set(),
+    selectedMotoboyIds: new Set(),
+    messages: [],
+    supportTickets: [],
+    banners: [],
+    generalTickets: [],
+    bannerModal: null, // {id?, imageUrl, audience, linkType, linkValue, active, priority, startAt, endAt} while the form is open
+    freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
+    messageModal: null, // {audience, type, title, body, ids} while the compose dialog is open
+    supportActionModal: null // {orderId, action:'end'|'return', note} while the support-action dialog is open
+  };
+  // Not part of state on purpose — this is view-only (map pan/zoom), and
+  // putting it in state would trigger a full re-render loop on every pan.
+  let liveMap = null;
+  let liveMapMarkers = [];
+  let liveMapMarkersById = {};
+
+  function esc(s){
+    return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function formatMoney(v){
+    return 'R$ ' + (Number(v)||0).toFixed(2).replace('.', ',');
+  }
+  function formatDate(ts){
+    if(!ts) return '';
+    return new Date(ts).toLocaleDateString('pt-BR');
+  }
+  function formatDateTime(ts){
+    if(!ts) return '';
+    return new Date(ts).toLocaleString('pt-BR');
+  }
+  function showToast(msg){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(showToast._h);
+    showToast._h = setTimeout(()=>t.classList.remove('show'), 2600);
+  }
+
+  async function api(method, path, body){
+    try{
+      const res = await fetch(API_BASE + path, {
+        method,
+        headers: Object.assign(
+          {'Content-Type':'application/json'},
+          state.token ? {'Authorization':'Bearer '+state.token} : {}
+        ),
+        body: body!==undefined ? JSON.stringify(body) : undefined
+      });
+      const data = await res.json().catch(()=>null);
+      if(res.status === 401){
+        // token expired/invalid — bounce back to login
+        state.token = null;
+        localStorage.removeItem(TOKEN_KEY);
+        state.screen = 'login';
+        render();
+        return {error:(data&&data.error)||'Sessão expirada — entre novamente'};
+      }
+      if(!res.ok) return {error:(data&&data.error)||'Erro no servidor'};
+      return data || {};
+    }catch(e){
+      return {error:'Não consegui falar com o servidor'};
+    }
+  }
+
+  async function login(password){
+    state.loginBusy = true; state.loginError=''; render();
+    const result = await api('POST', '/api/admin/login', {password});
+    state.loginBusy = false;
+    if(result.error){ state.loginError = result.error; render(); return; }
+    state.token = result.token;
+    localStorage.setItem(TOKEN_KEY, result.token);
+    state.screen = 'dash';
+    await loadAll();
+    render();
+    startPolling();
+  }
+
+  function logout(){
+    state.token = null;
+    localStorage.removeItem(TOKEN_KEY);
+    state.screen = 'login';
+    stopPolling();
+    render();
+  }
+
+  async function loadAll(){
+    const [summary, businesses, motoboys, orders, messages, supportTickets, banners, generalTickets] = await Promise.all([
+      api('GET', '/api/admin/summary'),
+      api('GET', '/api/admin/businesses'),
+      api('GET', '/api/admin/motoboys'),
+      api('GET', '/api/admin/orders'),
+      api('GET', '/api/admin/messages'),
+      api('GET', '/api/admin/support-tickets'),
+      api('GET', '/api/admin/banners'),
+      api('GET', '/api/admin/general-tickets')
+    ]);
+    if(!summary.error) state.summary = summary;
+    if(Array.isArray(businesses)) state.businesses = businesses;
+    if(Array.isArray(motoboys)) state.motoboys = motoboys;
+    if(Array.isArray(orders)) state.orders = orders;
+    if(Array.isArray(messages)) state.messages = messages;
+    if(Array.isArray(supportTickets)) state.supportTickets = supportTickets;
+    if(Array.isArray(banners)) state.banners = banners;
+    if(Array.isArray(generalTickets)) state.generalTickets = generalTickets;
+  }
+
+  async function loadReport(){
+    const result = await api('GET', '/api/admin/reports?period='+state.reportPeriod);
+    if(!result.error) state.report = result;
+  }
+
+  let pollHandle = null;
+  function startPolling(){
+    stopPolling();
+    pollHandle = setInterval(async ()=>{
+      if(state.screen !== 'dash') return;
+      // Don't rebuild the screen while something is being typed — an edit
+      // form open, the free-credits/message modals, or the compose fields
+      // on the Mensagens tab (those aren't tracked in state, so a re-render
+      // would wipe them outright).
+      if(state.editingId || state.freeCreditsModal || state.messageModal || state.supportActionModal || state.bannerModal || state.tab === 'mensagens') return;
+      await loadAll();
+      if(state.tab === 'relatorios') await loadReport();
+      render();
+    }, 8000);
+  }
+  function stopPolling(){ if(pollHandle) clearInterval(pollHandle); pollHandle=null; }
+
+  async function toggleBusinessBlock(id, blocked){
+    if(blocked && !confirm('Bloquear esse comércio? Ele não vai conseguir fazer login nem pedir novas entregas.')) return;
+    const result = await api('PATCH', '/api/admin/businesses/'+id+'/block', {blocked});
+    if(result.error){ showToast(result.error); return; }
+    showToast(blocked ? 'Comércio bloqueado' : 'Comércio desbloqueado');
+    await loadAll(); render();
+  }
+  async function toggleMotoboyBlock(id, blocked){
+    if(blocked && !confirm('Bloquear esse motoboy? Ele não vai conseguir fazer login nem receber novas corridas.')) return;
+    const result = await api('PATCH', '/api/admin/motoboys/'+id+'/block', {blocked});
+    if(result.error){ showToast(result.error); return; }
+    showToast(blocked ? 'Motoboy bloqueado' : 'Motoboy desbloqueado');
+    await loadAll(); render();
+  }
+  async function deleteBusiness(id, name){
+    if(!confirm('Excluir "'+name+'" permanentemente? Essa ação não pode ser desfeita — o histórico de entregas antigas continua registrado, mas a conta e os créditos somem.')) return;
+    const result = await api('DELETE', '/api/admin/businesses/'+id, {});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Comércio excluído');
+    await loadAll(); render();
+  }
+  async function deleteMotoboy(id, name){
+    if(!confirm('Excluir "'+name+'" permanentemente? Essa ação não pode ser desfeita — o histórico de entregas antigas continua registrado, mas a conta some.')) return;
+    const result = await api('DELETE', '/api/admin/motoboys/'+id, {});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Motoboy excluído');
+    await loadAll(); render();
+  }
+  async function approveMotoboy(id){
+    const result = await api('PATCH', '/api/admin/motoboys/'+id+'/approve', {approved:true});
+    if(result.error){ showToast(result.error); return; }
+    showToast('✓ Motoboy aprovado — já pode ficar on-line');
+    await loadAll(); render();
+  }
+
+  async function resolveGeneralTicket(id){
+    const result = await api('PATCH', '/api/admin/general-tickets/'+id, {status:'resolvido'});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Chamado marcado como resolvido');
+    await loadAll(); render();
+  }
+
+  // ---------- banners ----------
+  function openBannerModal(existing){
+    state.bannerModal = existing ? Object.assign({}, existing) : {
+      id: null, imageUrl:'', audience:'both', linkType:'none', linkValue:'',
+      active:true, priority:0, startAt:null, endAt:null
+    };
+    render();
+  }
+  function closeBannerModal(){ state.bannerModal = null; render(); }
+  async function saveBanner(){
+    const m = state.bannerModal;
+    if(!m.imageUrl || !m.imageUrl.trim()){ showToast('Preencha a URL da imagem'); return; }
+    const payload = {
+      imageUrl: m.imageUrl, audience: m.audience, linkType: m.linkType,
+      linkValue: m.linkValue, size: m.size, active: m.active, priority: m.priority,
+      startAt: m.startAt, endAt: m.endAt
+    };
+    const result = m.id
+      ? await api('PATCH', '/api/admin/banners/'+m.id, payload)
+      : await api('POST', '/api/admin/banners', payload);
+    if(result.error){ showToast(result.error); return; }
+    showToast(m.id ? 'Banner atualizado' : 'Banner criado');
+    state.bannerModal = null;
+    await loadAll(); render();
+  }
+  async function toggleBannerActive(id, active){
+    const result = await api('PATCH', '/api/admin/banners/'+id, {active});
+    if(result.error){ showToast(result.error); return; }
+    showToast(active ? 'Banner ativado' : 'Banner desativado');
+    await loadAll(); render();
+  }
+  async function deleteBanner(id){
+    if(!confirm('Excluir esse banner permanentemente?')) return;
+    const result = await api('DELETE', '/api/admin/banners/'+id, {});
+    if(result.error){ showToast(result.error); return; }
+    showToast('Banner excluído');
+    await loadAll(); render();
+  }
+
+  // ---------- mapa ao vivo ----------
+  function renderLiveMap(){
+    const container = document.getElementById('live-map');
+    if(!container || typeof L === 'undefined') return;
+    const LOCATION_FRESHNESS_MS = 10 * 60 * 1000;
+    const tracked = (state.motoboys||[]).filter(m =>
+      m.status === 'online' && m.lastLocation &&
+      typeof m.lastLocation.lat === 'number' &&
+      (Date.now() - (m.lastLocation.updatedAt||0)) <= LOCATION_FRESHNESS_MS
+    );
+
+    // The whole panel re-renders (rebuilds the DOM) on every poll, so the
+    // map container itself is a brand-new element each time — we can't
+    // just "update markers" on the old instance. Re-create it, but keep
+    // whatever center/zoom the admin last had, so it doesn't keep
+    // snapping back and undoing a manual pan/zoom every 8s.
+    const prevView = liveMap ? {center: liveMap.getCenter(), zoom: liveMap.getZoom()} : null;
+    liveMap = L.map(container, {attributionControl:false});
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(liveMap);
+    liveMapMarkers = [];
+    liveMapMarkersById = {};
+
+    if(tracked.length){
+      const bounds = [];
+      tracked.forEach(m => {
+        const {lat, lng, acc} = m.lastLocation;
+        const marker = L.circleMarker([lat,lng], {
+          radius:9, color:'#0B0B0F', weight:2, fillColor:'#4CD964', fillOpacity:0.95
+        }).addTo(liveMap);
+        marker.bindPopup(`<strong>${esc(m.name)}</strong><br>${esc(m.vehicle||'')}<br>Precisão: ${acc!=null?acc+'m':'?'}<br>Atualizado ${formatDateTime(m.lastLocation.updatedAt)}`);
+        liveMapMarkers.push(marker);
+        liveMapMarkersById[m.id] = marker;
+        bounds.push([lat,lng]);
+      });
+      if(prevView){
+        liveMap.setView(prevView.center, prevView.zoom);
+      } else {
+        liveMap.fitBounds(bounds, {padding:[30,30], maxZoom:15});
+      }
+    } else {
+      liveMap.setView(prevView ? prevView.center : [-21.1367, -47.9909], prevView ? prevView.zoom : 12); // Sertãozinho/SP como padrão se não houver nenhum motoboy rastreado ainda
+    }
+  }
+
+  async function saveBusinessEdit(id, data){
+    const result = await api('PATCH', '/api/admin/businesses/'+id, data);
+    if(result.error){ showToast(result.error); return; }
+    showToast('Comércio atualizado');
+    state.editingId = null;
+    await loadAll();
+    render();
+  }
+  async function saveMotoboyEdit(id, data){
+    const result = await api('PATCH', '/api/admin/motoboys/'+id+'/details', data);
+    if(result.error){ showToast(result.error); return; }
+    showToast('Motoboy atualizado');
+    state.editingId = null;
+    await loadAll();
+    render();
+  }
+
+  // ---------- seleção múltipla ----------
+  function toggleSelected(setKey, id){
+    const s = state[setKey];
+    if(s.has(id)) s.delete(id); else s.add(id);
+    render();
+  }
+  function toggleSelectAll(setKey, allIds){
+    const s = state[setKey];
+    if(allIds.every(id=>s.has(id))) allIds.forEach(id=>s.delete(id));
+    else allIds.forEach(id=>s.add(id));
+    render();
+  }
+  function clearSelection(setKey){
+    state[setKey].clear();
+    render();
+  }
+
+  // ---------- créditos grátis ----------
+  function openFreeCreditsModal(ids, active){
+    state.freeCreditsModal = { ids, active, until: '' };
+    render();
+  }
+  function closeFreeCreditsModal(){
+    state.freeCreditsModal = null;
+    render();
+  }
+  async function confirmFreeCredits(){
+    const m = state.freeCreditsModal;
+    if(!m) return;
+    const untilTs = m.until ? new Date(m.until + 'T23:59:59').getTime() : null;
+    const result = await api('POST', '/api/admin/businesses/free-credits-bulk', {
+      ids: m.ids, active: m.active, until: untilTs
+    });
+    if(result.error){ showToast(result.error); return; }
+    showToast(m.active
+      ? `🎁 Créditos grátis ativados para ${result.count} comércio(s)`
+      : `Créditos grátis desativados para ${result.count} comércio(s)`);
+    state.freeCreditsModal = null;
+    state.selectedBusinessIds.clear();
+    await loadAll();
+    render();
+  }
+
+  // ---------- mensagens ----------
+  function openMessageModal(audience, ids){
+    state.messageModal = { audience, type: 'aviso', title: '', body: '', ids: ids || [] };
+    render();
+  }
+  function closeMessageModal(){
+    state.messageModal = null;
+    render();
+  }
+  async function confirmSendMessage(){
+    const m = state.messageModal;
+    if(!m) return;
+    if(!m.title.trim() || !m.body.trim()){ showToast('Preencha o título e a mensagem'); return; }
+    const destino = m.ids.length ? `${m.ids.length} selecionado(s)` : 'TODOS os '+(m.audience==='business'?'comércios':'motoboys');
+    if(!confirm(`Enviar essa mensagem para ${destino}? Não dá pra desfazer depois de enviada.`)) return;
+    const result = await api('POST', '/api/admin/messages', {
+      audience: m.audience, type: m.type, title: m.title.trim(), body: m.body.trim(),
+      ids: m.ids.length ? m.ids : null
+    });
+    if(result.error){ showToast(result.error); return; }
+    showToast('✅ Mensagem enviada para ' + result.message.targetCount + ' destinatário(s)');
+    state.messageModal = null;
+    state.selectedBusinessIds.clear();
+    state.selectedMotoboyIds.clear();
+    await loadAll();
+    render();
+  }
+
+  // ---------- suporte (corridas com problema reportado pelo motoboy) ----------
+  function openSupportActionModal(orderId, action){
+    state.supportActionModal = { orderId, action, note: '' };
+    render();
+  }
+  function closeSupportActionModal(){
+    state.supportActionModal = null;
+    render();
+  }
+  async function confirmSupportAction(){
+    const m = state.supportActionModal;
+    if(!m) return;
+    const isEnd = m.action === 'end';
+    const path = '/api/admin/orders/'+m.orderId+'/'+(isEnd?'end':'return-to-business');
+    const result = await api('POST', path, { note: m.note });
+    if(result.error){ showToast(result.error); return; }
+    showToast(isEnd ? '✅ Corrida encerrada' : '✅ Motoboy avisado — voltando para o comércio');
+    state.supportActionModal = null;
+    await loadAll();
+    render();
+  }
+
+  const STATUS_LABELS = {
+    pendente:'Procurando motoboy', aceito:'Aceita', no_local_retirada:'Na retirada',
+    em_entrega:'Em entrega', no_local_entrega:'No destino', retornando:'🔁 Voltando', no_local_retorno:'🔁 De volta na retirada',
+    entregue:'Entregue', cancelado:'Cancelada'
+  };
+  const SUPPORT_REASON_LABELS = {
+    endereco_errado: 'Endereço/localização errada',
+    cliente_ausente: 'Cliente não atende / não está no local',
+    problema_pedido: 'Problema com o pedido',
+    acidente_emergencia: 'Acidente ou emergência',
+    outro: 'Outro'
+  };
+
+  function renderLogin(){
+    return `
+      <p class="eyebrow">ChegouJá</p>
+      <h1>Painel administrativo</h1>
+      <div class="field">
+        <label>Senha de administrador</label>
+        <input type="password" id="admin-password" placeholder="••••••••">
+      </div>
+      <button class="btn" id="btn-login" ${state.loginBusy?'disabled':''}>${state.loginBusy?'Entrando…':'Entrar'}</button>
+      <div class="error-box">${esc(state.loginError)}</div>
+    `;
+  }
+
+  function renderBarChart(series){
+    if(!series || !series.length) return '<p class="empty">Sem dados no período.</p>';
+    const w = 600, h = 160, padBottom = 22, padTop = 10;
+    const maxVal = Math.max(1, ...series.map(s=>s.delivered));
+    const barW = w / series.length;
+    const bars = series.map((s, i) => {
+      const barH = ((h - padBottom - padTop) * s.delivered) / maxVal;
+      const x = i * barW + barW*0.15;
+      const y = h - padBottom - barH;
+      const bw = barW * 0.7;
+      const showLabel = series.length <= 10 || i % Math.ceil(series.length/10) === 0;
+      return `
+        <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(barH,1).toFixed(1)}" rx="3" fill="var(--lime)"><title>${esc(s.label)}: ${s.delivered} entregas</title></rect>
+        ${s.delivered>0 ? `<text x="${(x+bw/2).toFixed(1)}" y="${(y-4).toFixed(1)}" font-size="9" fill="#8A8A95" text-anchor="middle">${s.delivered}</text>` : ''}
+        ${showLabel ? `<text x="${(x+bw/2).toFixed(1)}" y="${h-6}" font-size="9" fill="#8A8A95" text-anchor="middle">${esc(s.label)}</text>` : ''}
+      `;
+    }).join('');
+    return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block;">${bars}</svg>`;
+  }
+
+  function renderDash(){
+    const s = state.summary;
+    const tabBtn = (key,label) => `<button class="tab ${state.tab===key?'active':''}" data-tab="${key}">${label}</button>`;
+
+    let body = '';
+    if(state.tab === 'resumo'){
+      body = !s ? '<p class="loading">Carregando…</p>' : `
+        <div class="grid">
+          <div class="stat"><span class="stat-value">${s.totalBusinesses}</span><span class="stat-label">Comércios</span></div>
+          <div class="stat"><span class="stat-value">${s.totalMotoboys}</span><span class="stat-label">Motoboys (${s.motoboysOnline} on-line)</span></div>
+          ${s.motoboysPendingApproval>0 ? `<div class="stat" style="border-color:var(--warn);"><span class="stat-value" style="color:var(--warn);">${s.motoboysPendingApproval}</span><span class="stat-label">Aguardando aprovação</span></div>` : ''}
+          <div class="stat"><span class="stat-value">${s.activeOrders}</span><span class="stat-label">Corridas em andamento</span></div>
+          <div class="stat"><span class="stat-value">${s.deliveredOrders}</span><span class="stat-label">Entregas concluídas</span></div>
+          <div class="stat"><span class="stat-value">${s.canceledOrders}</span><span class="stat-label">Canceladas</span></div>
+          <div class="stat"><span class="stat-value">${formatMoney(s.platformRevenue)}</span><span class="stat-label">Receita da plataforma</span></div>
+          <div class="stat"><span class="stat-value">${formatMoney(s.totalPaidToMotoboys)}</span><span class="stat-label">Pago a motoboys (total)</span></div>
+          <div class="stat"><span class="stat-value">${formatMoney(s.creditsInCirculation)}</span><span class="stat-label">Créditos em carteira</span></div>
+        </div>
+      `;
+    } else if(state.tab === 'comercios'){
+      const list = state.businesses||[];
+      const allIds = list.map(b=>b.id);
+      const sel = state.selectedBusinessIds;
+      const bulkBar = sel.size>0 ? `
+        <div class="bulk-bar">
+          <span class="count">${sel.size} selecionado(s)</span>
+          <button class="btn-ghost btn-ok" data-bulk-free-on="1">🎁 Ativar grátis</button>
+          <button class="btn-ghost" data-bulk-free-off="1">Desativar grátis</button>
+          <button class="btn-ghost" data-bulk-message="1">✉️ Mensagem</button>
+          <button class="btn-ghost" data-clear-selection="business">Limpar</button>
+        </div>
+      ` : '';
+      body = `
+        ${allIds.length ? `<div class="select-row"><label><input type="checkbox" class="row-checkbox" id="select-all-business" ${allIds.length && allIds.every(id=>sel.has(id))?'checked':''}> Selecionar todos</label></div>` : ''}
+        ${bulkBar}
+        ${list.map(b => `
+        <div class="row" style="flex-direction:column;align-items:stretch;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <input type="checkbox" class="row-checkbox" data-select-business="${b.id}" ${sel.has(b.id)?'checked':''}>
+            <div class="row-main">
+              <strong>${esc(b.name)}</strong>${b.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}${b.freeCreditsEffective?'<span class="badge free">🎁 GRÁTIS'+(b.freeCredits&&b.freeCredits.until?' até '+formatDate(b.freeCredits.until):'')+'</span>':''}
+              <div class="row-sub">${esc(b.email||b.phone||'')} · ${b.ridesCount||0} entregas · saldo ${formatMoney(b.credits||0)}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn-ghost" data-edit-business="${b.id}">Editar</button>
+              <button class="btn-ghost" data-message-business="${b.id}">✉️ Mensagem</button>
+              ${b.freeCreditsEffective
+                ? `<button class="btn-ghost" data-free-off-one="${b.id}">Desativar grátis</button>`
+                : `<button class="btn-ghost btn-ok" data-free-on-one="${b.id}">🎁 Créditos grátis</button>`}
+              <button class="btn-ghost ${b.blocked?'btn-ok':'btn-danger'}" data-block-business="${b.id}" data-blocked="${b.blocked?'0':'1'}">${b.blocked?'Desbloquear':'Bloquear'}</button>
+              <button class="btn-ghost btn-danger" data-delete-business="${b.id}" data-name="${esc(b.name)}">Excluir</button>
+            </div>
+          </div>
+          ${state.editingId===b.id ? `
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:grid;gap:8px;">
+            <input class="edit-input" data-field="name" value="${esc(b.name)}" placeholder="Nome">
+            <input class="edit-input" data-field="phone" value="${esc(b.phone||'')}" placeholder="Telefone">
+            <input class="edit-input" data-field="email" value="${esc(b.email||'')}" placeholder="E-mail">
+            <input class="edit-input" data-field="address" value="${esc(b.address||'')}" placeholder="Endereço">
+            <div style="display:flex;gap:8px;">
+              <button class="btn-ghost btn-ok" data-save-business="${b.id}">Salvar</button>
+              <button class="btn-ghost" data-cancel-edit="1">Cancelar</button>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      `).join('') || '<p class="empty">Nenhum comércio cadastrado ainda.</p>'}
+      `;
+    } else if(state.tab === 'motoboys'){
+      const sorted = (state.motoboys||[]).slice().sort((a,b)=> (a.approved===false?0:1) - (b.approved===false?0:1));
+      const allIds = sorted.map(m=>m.id);
+      const sel = state.selectedMotoboyIds;
+      const bulkBar = sel.size>0 ? `
+        <div class="bulk-bar">
+          <span class="count">${sel.size} selecionado(s)</span>
+          <button class="btn-ghost" data-bulk-message-motoboy="1">✉️ Mensagem</button>
+          <button class="btn-ghost" data-clear-selection="motoboy">Limpar</button>
+        </div>
+      ` : '';
+      body = `
+        ${allIds.length ? `<div class="select-row"><label><input type="checkbox" class="row-checkbox" id="select-all-motoboy" ${allIds.length && allIds.every(id=>sel.has(id))?'checked':''}> Selecionar todos</label></div>` : ''}
+        ${bulkBar}
+        ${sorted.map(m => `
+        <div class="row" style="flex-direction:column;align-items:stretch;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <input type="checkbox" class="row-checkbox" data-select-motoboy="${m.id}" ${sel.has(m.id)?'checked':''}>
+            <div class="row-main">
+              <strong>${esc(m.name)}</strong>${m.blocked?'<span class="badge blocked">BLOQUEADO</span>':''}${m.approved===false?'<span class="badge pending">AGUARDANDO APROVAÇÃO</span>':''}
+              <div class="row-sub">${esc(m.email||m.phone||'')} · ${esc(m.vehicle||'')} · ${m.ridesCount||0} entregas · status ${esc(m.status||'offline')}${m.rating&&m.rating.count?' · ⭐ '+m.rating.average.toFixed(1):''}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn-ghost" data-edit-motoboy="${m.id}">Editar</button>
+              <button class="btn-ghost" data-message-motoboy="${m.id}">✉️ Mensagem</button>
+              ${m.approved===false ? `<button class="btn-ghost btn-ok" data-approve-motoboy="${m.id}">✓ Aprovar</button>` : ''}
+              <button class="btn-ghost ${m.blocked?'btn-ok':'btn-danger'}" data-block-motoboy="${m.id}" data-blocked="${m.blocked?'0':'1'}">${m.blocked?'Desbloquear':'Bloquear'}</button>
+              <button class="btn-ghost btn-danger" data-delete-motoboy="${m.id}" data-name="${esc(m.name)}">Excluir</button>
+            </div>
+          </div>
+          ${state.editingId===m.id ? `
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:grid;gap:8px;">
+            <input class="edit-input" data-field="name" value="${esc(m.name)}" placeholder="Nome">
+            <input class="edit-input" data-field="phone" value="${esc(m.phone||'')}" placeholder="Telefone">
+            <input class="edit-input" data-field="email" value="${esc(m.email||'')}" placeholder="E-mail">
+            <input class="edit-input" data-field="vehicle" value="${esc(m.vehicle||'')}" placeholder="Veículo">
+            <div style="display:flex;gap:8px;">
+              <button class="btn-ghost btn-ok" data-save-motoboy="${m.id}">Salvar</button>
+              <button class="btn-ghost" data-cancel-edit="1">Cancelar</button>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      `).join('') || '<p class="empty">Nenhum motoboy cadastrado ainda.</p>'}
+      `;
+    } else if(state.tab === 'mapa'){
+      const LOCATION_FRESHNESS_MS = 10 * 60 * 1000; // igual ao servidor
+      const tracked = (state.motoboys||[]).filter(m =>
+        m.status === 'online' && m.lastLocation &&
+        typeof m.lastLocation.lat === 'number' &&
+        (Date.now() - (m.lastLocation.updatedAt||0)) <= LOCATION_FRESHNESS_MS
+      );
+      body = `
+        <div class="field" style="max-width:320px;margin-bottom:12px;">
+          <label>Achar um motoboy no mapa</label>
+          <select id="map-motoboy-select">
+            <option value="">Selecione…</option>
+            ${tracked.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="map-legend">
+          <span><span class="map-dot" style="background:var(--ok);"></span> On-line com localização recente</span>
+          <span style="color:var(--muted);">${tracked.length} de ${(state.motoboys||[]).filter(m=>m.status==='online').length} motoboy(s) on-line aparecendo no mapa agora</span>
+        </div>
+        <div id="live-map"></div>
+        <p class="row-sub" style="margin-top:10px;">Só aparecem aqui motoboys on-line com uma localização enviada nos últimos 10 minutos. O pino atualiza sozinho a cada 8 segundos, junto com o resto do painel.</p>
+      `;
+    } else if(state.tab === 'corridas'){
+      body = (state.orders||[]).slice(0,100).map(o => `
+        <div class="row">
+          <div class="row-main">
+            <strong>#${o.id.slice(-6).toUpperCase()}</strong> · ${formatMoney(o.value)} · <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
+            ${o.arrivalOverrides && o.arrivalOverrides.length ? '<span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ chegada forçada (GPS)</span>' : ''}
+            ${o.debugRawValue !== undefined ? `<span class="badge" style="background:#2a1a3a;color:#c9a5ff;">🐞 recebido cru: ${esc(String(o.debugRawValue))}</span>` : ''}
+            <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
+            <div class="row-sub">${o.motoboyName ? '🏍️ '+esc(o.motoboyName) : 'sem motoboy ainda'}</div>
+          </div>
+        </div>
+      `).join('') || '<p class="empty">Nenhuma corrida ainda.</p>';
+    } else if(state.tab === 'banners'){
+      const AUDIENCE_LABELS = {motoboy:'Motoboys', business:'Comércios', both:'Motoboys e comércios'};
+      const now = Date.now();
+      const statusOf = (b) => {
+        if(!b.active) return {label:'Desativado', color:'var(--muted)'};
+        if(b.startAt && b.startAt > now) return {label:'Agendado', color:'var(--warn)'};
+        if(b.endAt && b.endAt < now) return {label:'Expirado', color:'var(--muted)'};
+        return {label:'Ativo agora', color:'var(--ok)'};
+      };
+      body = `
+        <div style="margin-bottom:14px;">
+          <button class="btn btn-ok" id="btn-new-banner">+ Novo banner</button>
+        </div>
+        ${(state.banners||[]).sort((a,b)=>(b.priority||0)-(a.priority||0)).map(b => {
+          const st = statusOf(b);
+          return `
+          <div class="row" style="align-items:flex-start;">
+            <img class="banner-thumb" src="${esc(b.imageUrl)}" alt="">
+            <div class="row-main">
+              <strong>${AUDIENCE_LABELS[b.audience]||b.audience}</strong>
+              <span class="badge" style="background:transparent;border:1px solid ${st.color};color:${st.color};">${st.label}</span>
+              <div class="row-sub">Tamanho: ${b.size==='mini'?'Mini':(b.size==='pequeno'?'Pequeno':'Grande')} · Prioridade ${b.priority||0} · Link: ${b.linkType==='none'?'nenhum':(b.linkType==='external'?'externo':'interno')}${b.linkValue?' — '+esc(b.linkValue):''}</div>
+              <div class="row-sub">${b.startAt?'Início '+formatDateTime(b.startAt):'Sem início agendado'} · ${b.endAt?'Fim '+formatDateTime(b.endAt):'Sem fim definido'}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn-ghost" data-edit-banner="${b.id}">Editar</button>
+              <button class="btn-ghost ${b.active?'btn-danger':'btn-ok'}" data-toggle-banner="${b.id}" data-active="${b.active?'0':'1'}">${b.active?'Desativar':'Ativar'}</button>
+              <button class="btn-ghost btn-danger" data-delete-banner="${b.id}">Excluir</button>
+            </div>
+          </div>
+        `;}).join('') || '<p class="empty">Nenhum banner criado ainda.</p>'}
+      `;
+    } else if(state.tab === 'suporte'){
+      const abertos = (state.supportTickets||[]).filter(t=>t.support.status==='aberto');
+      const resolvidos = (state.supportTickets||[]).filter(t=>t.support.status==='resolvido').slice(0,20);
+      const ticketRow = (o, isOpen) => `
+        <div class="row" style="flex-direction:column;align-items:stretch;${isOpen?'border-color:var(--orange, #ff6a3d);':''}">
+          <div class="row-main">
+            <strong>#${o.id.slice(-6).toUpperCase()}</strong>
+            <span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ ${esc(SUPPORT_REASON_LABELS[o.support.reason]||o.support.reason)}</span>
+            <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
+            <div class="row-sub">🏬 ${esc(o.businessName||'')} · 🏍️ ${esc(o.motoboyName||'sem motoboy no momento')}</div>
+            <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
+            ${o.support.note ? `<div class="row-sub">💬 "${esc(o.support.note)}"</div>` : ''}
+            <div class="row-sub">Reportado em ${formatDateTime(o.support.reportedAt)}</div>
+            ${!isOpen ? `<div class="row-sub">Resolvido em ${formatDateTime(o.support.resolvedAt)} · ação: ${o.support.resolvedAction==='encerrada'?'corrida encerrada':'motoboy mandado voltar ao comércio'}${o.support.resolvedNote?' · nota: "'+esc(o.support.resolvedNote)+'"':''}</div>` : ''}
+          </div>
+          ${isOpen ? `
+          <div class="row-actions" style="margin-top:10px;">
+            <button class="btn-ghost btn-danger" data-support-end="${o.id}">Encerrar corrida</button>
+            <button class="btn-ghost btn-ok" data-support-return="${o.id}">Voltar para o comércio</button>
+          </div>
+          ` : ''}
+        </div>
+      `;
+      body = `
+        <p class="eyebrow">Chamados abertos</p>
+        ${abertos.length ? abertos.map(o=>ticketRow(o,true)).join('') : '<p class="empty">Nenhum chamado de suporte em aberto no momento.</p>'}
+        <p class="eyebrow" style="margin-top:22px;">Últimos resolvidos</p>
+        ${resolvidos.length ? resolvidos.map(o=>ticketRow(o,false)).join('') : '<p class="empty">Nenhum chamado resolvido ainda.</p>'}
+        <p class="eyebrow" style="margin-top:22px;">Chamados gerais (motoboy falou sem estar em corrida)</p>
+        ${(state.generalTickets||[]).filter(t=>t.status==='aberto').map(t => `
+          <div class="row" style="flex-direction:column;align-items:stretch;border-color:var(--orange, #ff6a3d);">
+            <div class="row-main">
+              <span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ ${esc(SUPPORT_REASON_LABELS[t.reason]||t.reason)}</span>
+              <div class="row-sub">🏍️ ${esc(t.motoboyName)} ${t.motoboyPhone?'· 📱 '+esc(t.motoboyPhone):''}</div>
+              ${t.note ? `<div class="row-sub">💬 "${esc(t.note)}"</div>` : ''}
+              <div class="row-sub">Reportado em ${formatDateTime(t.reportedAt)}</div>
+            </div>
+            <div class="row-actions" style="margin-top:10px;">
+              <button class="btn-ghost btn-ok" data-general-ticket-resolve="${t.id}">Marcar como resolvido</button>
+            </div>
+          </div>
+        `).join('') || '<p class="empty">Nenhum chamado geral em aberto.</p>'}
+      `;
+    } else if(state.tab === 'mensagens'){
+      body = `
+        <div class="row" style="flex-direction:column;align-items:stretch;">
+          <strong style="margin-bottom:10px;">Nova mensagem</strong>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Público</label>
+            <select id="msg-audience">
+              <option value="business">Comércios</option>
+              <option value="motoboy">Motoboys</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;" id="msg-type-field">
+            <label>Tipo</label>
+            <select id="msg-type">
+              <option value="aviso">Aviso / manutenção</option>
+              <option value="promocao">Promoção</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Título</label>
+            <input class="edit-input" id="msg-title" placeholder="Ex: Manutenção programada">
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Mensagem</label>
+            <textarea id="msg-body" placeholder="Escreva a mensagem..."></textarea>
+          </div>
+          <p class="row-sub" style="margin-bottom:10px;">Vai para <strong>todos</strong> do público escolhido. Para mandar só para alguns, selecione-os nas abas Comércios/Motoboys e use o botão "✉️ Mensagem" de lá.</p>
+          <button class="btn" id="btn-send-broadcast" style="align-self:flex-start;">Enviar para todos</button>
+        </div>
+        <p class="eyebrow" style="margin-top:22px;">Histórico enviado</p>
+        ${(state.messages||[]).length ? state.messages.map(msg => `
+          <div class="msg-history-item">
+            <strong>${esc(msg.title)}</strong>
+            <span class="badge ${msg.type==='promocao'?'free':''}">${msg.type==='promocao'?'Promoção':'Aviso'}</span>
+            <span class="badge">${msg.audience==='business'?'Comércios':'Motoboys'}</span>
+            <div class="row-sub">${esc(msg.body)}</div>
+            <div class="row-sub">${formatDateTime(msg.createdAt)} · ${msg.allAudience ? 'todos' : msg.targetCount+' selecionado(s)'} · ${msg.targetCount} destinatário(s)</div>
+          </div>
+        `).join('') : '<p class="empty">Nenhuma mensagem enviada ainda.</p>'}
+      `;
+    } else if(state.tab === 'relatorios'){
+      const periodBtn = (key,label) => `<button class="tab ${state.reportPeriod===key?'active':''}" data-report-period="${key}">${label}</button>`;
+      const r = state.report;
+      body = `
+        <div class="tabs" style="margin-bottom:14px;">
+          ${periodBtn('hoje','Hoje')}
+          ${periodBtn('semana','7 dias')}
+          ${periodBtn('mes','30 dias')}
+        </div>
+        ${!r ? '<p class="loading">Carregando…</p>' : `
+          <div class="grid" style="margin-bottom:16px;">
+            <div class="stat"><span class="stat-value">${r.totals.delivered}</span><span class="stat-label">Entregas concluídas</span></div>
+            <div class="stat"><span class="stat-value">${r.totals.canceled}</span><span class="stat-label">Canceladas</span></div>
+            <div class="stat"><span class="stat-value">${formatMoney(r.totals.revenue)}</span><span class="stat-label">Receita da plataforma</span></div>
+            <div class="stat"><span class="stat-value">${formatMoney(r.totals.paidToMotoboys)}</span><span class="stat-label">Pago a motoboys</span></div>
+          </div>
+          <div class="stat" style="padding:16px 12px 8px;">
+            <span class="stat-label" style="margin-bottom:8px;display:block;">Entregas por ${state.reportPeriod==='hoje'?'hora':'dia'}</span>
+            ${renderBarChart(r.series)}
+          </div>
+        `}
+      `;
+    }
+
+    return `
+      <div class="topbar">
+        <div class="brand">CHEGOJÁ<span class="brand-tag">painel administrativo</span></div>
+        <button class="btn-ghost" id="btn-logout">Sair</button>
+      </div>
+      <div class="tabs">
+        ${tabBtn('resumo','Resumo')}
+        ${tabBtn('comercios','Comércios')}
+        ${tabBtn('motoboys','Motoboys')}
+        ${tabBtn('mapa','Mapa')}
+        ${tabBtn('corridas','Corridas')}
+        ${tabBtn('banners','Banners')}
+        ${tabBtn('suporte', 'Suporte' + (((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length + (state.generalTickets||[]).filter(t=>t.status==='aberto').length) ? ' ('+((state.supportTickets||[]).filter(t=>t.support.status==='aberto').length + (state.generalTickets||[]).filter(t=>t.status==='aberto').length)+')' : ''))}
+        ${tabBtn('mensagens','Mensagens')}
+        ${tabBtn('relatorios','Relatórios')}
+      </div>
+      ${body}
+    `;
+  }
+
+  function renderModals(){
+    let html = '';
+    if(state.freeCreditsModal){
+      const m = state.freeCreditsModal;
+      html += `
+        <div class="modal-overlay" id="modal-overlay">
+          <div class="modal-box">
+            <h2>${m.active ? '🎁 Ativar créditos grátis' : 'Desativar créditos grátis'}</h2>
+            <p class="row-sub" style="margin-bottom:14px;">${m.ids.length} comércio(s) selecionado(s).</p>
+            ${m.active ? `
+            <div class="field">
+              <label>Válido até (opcional — deixe em branco para grátis sem prazo, até você desligar)</label>
+              <input class="edit-input" type="date" id="free-credits-until" value="${esc(m.until||'')}">
+            </div>` : ''}
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn btn-ok" id="btn-confirm-free-credits">Confirmar</button>
+              <button class="btn-ghost" id="btn-cancel-free-credits">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    if(state.messageModal){
+      const m = state.messageModal;
+      html += `
+        <div class="modal-overlay" id="modal-overlay-2">
+          <div class="modal-box">
+            <h2>✉️ Enviar mensagem</h2>
+            <p class="row-sub" style="margin-bottom:14px;">Para ${esc(m.audience==='business'?'comércios':'motoboys')} · ${m.ids.length ? m.ids.length+' selecionado(s)' : 'TODOS'}</p>
+            ${m.audience==='business' ? `
+            <div class="field">
+              <label>Tipo</label>
+              <select id="compose-type">
+                <option value="aviso" ${m.type==='aviso'?'selected':''}>Aviso / manutenção</option>
+                <option value="promocao" ${m.type==='promocao'?'selected':''}>Promoção</option>
+              </select>
+            </div>` : ''}
+            <div class="field">
+              <label>Título</label>
+              <input class="edit-input" id="compose-title" value="${esc(m.title)}" placeholder="Ex: Promoção de fim de semana">
+            </div>
+            <div class="field">
+              <label>Mensagem</label>
+              <textarea id="compose-body" placeholder="Escreva a mensagem...">${esc(m.body)}</textarea>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn btn-ok" id="btn-confirm-message">Enviar</button>
+              <button class="btn-ghost" id="btn-cancel-message">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    if(state.bannerModal){
+      const m = state.bannerModal;
+      const toLocalInput = (ts) => {
+        if(!ts) return '';
+        const d = new Date(ts);
+        const pad = (n)=>String(n).padStart(2,'0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
+      html += `
+        <div class="modal-overlay" id="modal-overlay-banner">
+          <div class="modal-box">
+            <h2>${m.id ? '🖼️ Editar banner' : '🖼️ Novo banner'}</h2>
+            <div class="field">
+              <label>Imagem do banner (o banner inteiro é essa imagem)</label>
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" id="banner-image-file">
+              <div id="banner-upload-status" class="row-sub" style="margin-top:4px;"></div>
+              <input type="hidden" id="banner-imageUrl" value="${esc(m.imageUrl||'')}">
+            </div>
+            <img id="banner-image-preview" src="${esc(m.imageUrl||'')}" style="width:100%;border-radius:10px;margin-bottom:14px;border:1px solid var(--border);${m.imageUrl?'':'display:none;'}">
+            <div class="field">
+              <label>Tamanho do pop-up</label>
+              <select class="edit-input" id="banner-size">
+                <option value="grande" ${(m.size||'grande')==='grande'?'selected':''}>Grande (padrão — ocupa quase a tela toda)</option>
+                <option value="pequeno" ${m.size==='pequeno'?'selected':''}>Pequeno (um cartão menor, mais discreto)</option>
+                <option value="mini" ${m.size==='mini'?'selected':''}>Mini (bem pequeno, quase um selinho)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Público-alvo</label>
+              <select class="edit-input" id="banner-audience">
+                <option value="both" ${m.audience==='both'?'selected':''}>Motoboys e comércios</option>
+                <option value="motoboy" ${m.audience==='motoboy'?'selected':''}>Só motoboys</option>
+                <option value="business" ${m.audience==='business'?'selected':''}>Só comércios</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Ao tocar no banner</label>
+              <select class="edit-input" id="banner-linkType">
+                <option value="none" ${m.linkType==='none'?'selected':''}>Nenhuma ação (só informativo)</option>
+                <option value="external" ${m.linkType==='external'?'selected':''}>Abrir link externo</option>
+                <option value="internal" ${m.linkType==='internal'?'selected':''}>Abrir link/tela interna do app</option>
+              </select>
+            </div>
+            <div class="field" id="banner-linkValue-field" style="${m.linkType==='none'?'display:none;':''}">
+              <label>Endereço do link</label>
+              <input class="edit-input" id="banner-linkValue" value="${esc(m.linkValue||'')}" placeholder="https://... ou /caminho-interno">
+            </div>
+            <div class="field">
+              <label>Início (opcional — deixe em branco pra valer desde já)</label>
+              <input class="edit-input" type="datetime-local" id="banner-startAt" value="${toLocalInput(m.startAt)}">
+            </div>
+            <div class="field">
+              <label>Fim (opcional — deixe em branco pra não expirar sozinho)</label>
+              <input class="edit-input" type="datetime-local" id="banner-endAt" value="${toLocalInput(m.endAt)}">
+            </div>
+            <div class="field">
+              <label>Prioridade (maior número aparece primeiro na rotação)</label>
+              <input class="edit-input" type="number" id="banner-priority" value="${m.priority||0}">
+            </div>
+            <div class="field">
+              <label><input type="checkbox" id="banner-active" ${m.active!==false?'checked':''}> Ativo</label>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn btn-ok" id="btn-confirm-banner">Salvar</button>
+              <button class="btn-ghost" id="btn-cancel-banner">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    if(state.supportActionModal){
+      const m = state.supportActionModal;
+      const isEnd = m.action === 'end';
+      html += `
+        <div class="modal-overlay" id="modal-overlay-3">
+          <div class="modal-box">
+            <h2>${isEnd ? '🛑 Encerrar corrida' : '↩️ Voltar para o comércio'}</h2>
+            <p class="row-sub" style="margin-bottom:14px;">${isEnd
+              ? 'A corrida será marcada como CONCLUÍDA (não como cancelada) — não pesa contra o motoboy, e o comércio é cobrado normalmente, como numa entrega comum.'
+              : 'O mesmo motoboy avança pro estado "retornando" — como se estivesse voltando pro comércio com o pedido/pagamento. A corrida não fecha sozinha: ele ainda confirma a chegada de volta pra concluir, do jeito de sempre.'}</p>
+            <div class="field">
+              <label>Nota (opcional, fica registrada no chamado)</label>
+              <textarea id="support-action-note" placeholder="Ex: falamos com o motoboy, endereço confirmado com o cliente">${esc(m.note||'')}</textarea>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <button class="btn ${isEnd?'btn-danger':'btn-ok'}" id="btn-confirm-support-action">Confirmar</button>
+              <button class="btn-ghost" id="btn-cancel-support-action">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    return html;
+  }
+
+  function render(){
+    const root = document.getElementById('root');
+    const wrap = document.createElement('div');
+    wrap.className = 'wrap';
+    wrap.innerHTML = (state.screen === 'login' ? renderLogin() : renderDash()) + (state.screen==='dash' ? renderModals() : '');
+    root.innerHTML = '';
+    root.appendChild(wrap);
+
+    if(state.screen === 'login'){
+      const btn = document.getElementById('btn-login');
+      const input = document.getElementById('admin-password');
+      const doLogin = ()=>{
+        const pw = (input.value||'').trim();
+        if(!pw){ state.loginError='Digite a senha'; render(); return; }
+        login(pw);
+      };
+      if(btn) btn.onclick = doLogin;
+      if(input){
+        input.focus();
+        input.onkeydown = (e)=>{ if(e.key==='Enter') doLogin(); };
+      }
+    } else {
+      const logoutBtn = document.getElementById('btn-logout');
+      if(logoutBtn) logoutBtn.onclick = logout;
+      if(state.tab === 'mapa'){
+        renderLiveMap();
+        const mapSelect = document.getElementById('map-motoboy-select');
+        if(mapSelect) mapSelect.onchange = ()=>{
+          const marker = liveMapMarkersById[mapSelect.value];
+          if(marker && liveMap){
+            liveMap.setView(marker.getLatLng(), 16);
+            marker.openPopup();
+          }
+        };
+      }
+      root.querySelectorAll('[data-tab]').forEach(el=>{
+        el.onclick = async ()=>{
+          state.tab = el.getAttribute('data-tab');
+          if(state.tab === 'relatorios' && !state.report){ render(); await loadReport(); }
+          render();
+        };
+      });
+      root.querySelectorAll('[data-report-period]').forEach(el=>{
+        el.onclick = async ()=>{
+          state.reportPeriod = el.getAttribute('data-report-period');
+          state.report = null;
+          render();
+          await loadReport();
+          render();
+        };
+      });
+      root.querySelectorAll('[data-block-business]').forEach(el=>{
+        el.onclick = ()=>toggleBusinessBlock(el.getAttribute('data-block-business'), el.getAttribute('data-blocked')==='1');
+      });
+      root.querySelectorAll('[data-block-motoboy]').forEach(el=>{
+        el.onclick = ()=>toggleMotoboyBlock(el.getAttribute('data-block-motoboy'), el.getAttribute('data-blocked')==='1');
+      });
+      root.querySelectorAll('[data-delete-business]').forEach(el=>{
+        el.onclick = ()=>deleteBusiness(el.getAttribute('data-delete-business'), el.getAttribute('data-name'));
+      });
+      root.querySelectorAll('[data-delete-motoboy]').forEach(el=>{
+        el.onclick = ()=>deleteMotoboy(el.getAttribute('data-delete-motoboy'), el.getAttribute('data-name'));
+      });
+      root.querySelectorAll('[data-approve-motoboy]').forEach(el=>{
+        el.onclick = ()=>approveMotoboy(el.getAttribute('data-approve-motoboy'));
+      });
+      root.querySelectorAll('[data-edit-business]').forEach(el=>{
+        el.onclick = ()=>{ state.editingId = el.getAttribute('data-edit-business'); render(); };
+      });
+      root.querySelectorAll('[data-edit-motoboy]').forEach(el=>{
+        el.onclick = ()=>{ state.editingId = el.getAttribute('data-edit-motoboy'); render(); };
+      });
+      root.querySelectorAll('[data-cancel-edit]').forEach(el=>{
+        el.onclick = ()=>{ state.editingId = null; render(); };
+      });
+      root.querySelectorAll('[data-save-business]').forEach(el=>{
+        el.onclick = ()=>{
+          const id = el.getAttribute('data-save-business');
+          const row = el.closest('.row');
+          const data = {};
+          row.querySelectorAll('.edit-input').forEach(inp=>{ data[inp.getAttribute('data-field')] = inp.value; });
+          saveBusinessEdit(id, data);
+        };
+      });
+      root.querySelectorAll('[data-save-motoboy]').forEach(el=>{
+        el.onclick = ()=>{
+          const id = el.getAttribute('data-save-motoboy');
+          const row = el.closest('.row');
+          const data = {};
+          row.querySelectorAll('.edit-input').forEach(inp=>{ data[inp.getAttribute('data-field')] = inp.value; });
+          saveMotoboyEdit(id, data);
+        };
+      });
+
+      // ---------- seleção múltipla ----------
+      root.querySelectorAll('[data-select-business]').forEach(el=>{
+        el.onclick = ()=>toggleSelected('selectedBusinessIds', el.getAttribute('data-select-business'));
+      });
+      root.querySelectorAll('[data-select-motoboy]').forEach(el=>{
+        el.onclick = ()=>toggleSelected('selectedMotoboyIds', el.getAttribute('data-select-motoboy'));
+      });
+      const selectAllBusiness = document.getElementById('select-all-business');
+      if(selectAllBusiness) selectAllBusiness.onclick = ()=>toggleSelectAll('selectedBusinessIds', (state.businesses||[]).map(b=>b.id));
+      const selectAllMotoboy = document.getElementById('select-all-motoboy');
+      if(selectAllMotoboy) selectAllMotoboy.onclick = ()=>toggleSelectAll('selectedMotoboyIds', (state.motoboys||[]).map(m=>m.id));
+      root.querySelectorAll('[data-clear-selection]').forEach(el=>{
+        el.onclick = ()=>clearSelection(el.getAttribute('data-clear-selection')==='business'?'selectedBusinessIds':'selectedMotoboyIds');
+      });
+
+      // ---------- créditos grátis: individual e em massa ----------
+      root.querySelectorAll('[data-free-on-one]').forEach(el=>{
+        el.onclick = ()=>openFreeCreditsModal([el.getAttribute('data-free-on-one')], true);
+      });
+      root.querySelectorAll('[data-free-off-one]').forEach(el=>{
+        el.onclick = ()=>openFreeCreditsModal([el.getAttribute('data-free-off-one')], false);
+      });
+      const bulkFreeOn = document.getElementById('bulk-free-on') || root.querySelector('[data-bulk-free-on]');
+      if(bulkFreeOn) bulkFreeOn.onclick = ()=>openFreeCreditsModal(Array.from(state.selectedBusinessIds), true);
+      const bulkFreeOff = root.querySelector('[data-bulk-free-off]');
+      if(bulkFreeOff) bulkFreeOff.onclick = ()=>openFreeCreditsModal(Array.from(state.selectedBusinessIds), false);
+      const confirmFree = document.getElementById('btn-confirm-free-credits');
+      if(confirmFree) confirmFree.onclick = ()=>{
+        const untilInput = document.getElementById('free-credits-until');
+        if(untilInput) state.freeCreditsModal.until = untilInput.value;
+        confirmFreeCredits();
+      };
+      const cancelFree = document.getElementById('btn-cancel-free-credits');
+      if(cancelFree) cancelFree.onclick = closeFreeCreditsModal;
+
+      // ---------- mensagens: individual e em massa ----------
+      root.querySelectorAll('[data-message-business]').forEach(el=>{
+        el.onclick = ()=>openMessageModal('business', [el.getAttribute('data-message-business')]);
+      });
+      root.querySelectorAll('[data-message-motoboy]').forEach(el=>{
+        el.onclick = ()=>openMessageModal('motoboy', [el.getAttribute('data-message-motoboy')]);
+      });
+      const bulkMessage = root.querySelector('[data-bulk-message]');
+      if(bulkMessage) bulkMessage.onclick = ()=>openMessageModal('business', Array.from(state.selectedBusinessIds));
+      const bulkMessageMotoboy = root.querySelector('[data-bulk-message-motoboy]');
+      if(bulkMessageMotoboy) bulkMessageMotoboy.onclick = ()=>openMessageModal('motoboy', Array.from(state.selectedMotoboyIds));
+      const confirmMessage = document.getElementById('btn-confirm-message');
+      if(confirmMessage) confirmMessage.onclick = ()=>{
+        state.messageModal.type = (document.getElementById('compose-type')||{}).value || 'aviso';
+        state.messageModal.title = (document.getElementById('compose-title')||{}).value || '';
+        state.messageModal.body = (document.getElementById('compose-body')||{}).value || '';
+        confirmSendMessage();
+      };
+      const cancelMessage = document.getElementById('btn-cancel-message');
+      if(cancelMessage) cancelMessage.onclick = closeMessageModal;
+
+      // ---------- suporte: encerrar corrida / voltar para o comércio ----------
+      root.querySelectorAll('[data-support-end]').forEach(el=>{
+        el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-end'), 'end');
+      });
+      root.querySelectorAll('[data-support-return]').forEach(el=>{
+        el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-return'), 'return');
+      });
+      root.querySelectorAll('[data-general-ticket-resolve]').forEach(el=>{
+        el.onclick = ()=>resolveGeneralTicket(el.getAttribute('data-general-ticket-resolve'));
+      });
+      const confirmSupportActionBtn = document.getElementById('btn-confirm-support-action');
+      if(confirmSupportActionBtn) confirmSupportActionBtn.onclick = ()=>{
+        const noteField = document.getElementById('support-action-note');
+        if(noteField) state.supportActionModal.note = noteField.value;
+        confirmSupportAction();
+      };
+      const cancelSupportActionBtn = document.getElementById('btn-cancel-support-action');
+      if(cancelSupportActionBtn) cancelSupportActionBtn.onclick = closeSupportActionModal;
+
+      // ---------- aba mensagens: envio de broadcast para todos ----------
+      const sendBroadcast = document.getElementById('btn-send-broadcast');
+      if(sendBroadcast) sendBroadcast.onclick = async ()=>{
+        const audience = (document.getElementById('msg-audience')||{}).value || 'business';
+        const type = (document.getElementById('msg-type')||{}).value || 'aviso';
+        const title = (document.getElementById('msg-title')||{}).value || '';
+        const bodyText = (document.getElementById('msg-body')||{}).value || '';
+        if(!title.trim() || !bodyText.trim()){ showToast('Preencha o título e a mensagem'); return; }
+        const destino = 'TODOS os '+(audience==='business'?'comércios':'motoboys');
+        if(!confirm(`Enviar essa mensagem para ${destino}? Não dá pra desfazer depois de enviada.`)) return;
+        const result = await api('POST', '/api/admin/messages', { audience, type, title: title.trim(), body: bodyText.trim(), ids: null });
+        if(result.error){ showToast(result.error); return; }
+        showToast('✅ Mensagem enviada para ' + result.message.targetCount + ' destinatário(s)');
+        await loadAll();
+        render();
+      };
+      const msgAudienceSelect = document.getElementById('msg-audience');
+      const msgTypeField = document.getElementById('msg-type-field');
+      if(msgAudienceSelect && msgTypeField){
+        const syncTypeVisibility = ()=>{ msgTypeField.style.display = msgAudienceSelect.value==='motoboy' ? 'none' : ''; };
+        msgAudienceSelect.onchange = syncTypeVisibility;
+        syncTypeVisibility();
+      }
+
+      // ---------- banners ----------
+      const btnNewBanner = document.getElementById('btn-new-banner');
+      if(btnNewBanner) btnNewBanner.onclick = ()=>openBannerModal(null);
+      root.querySelectorAll('[data-edit-banner]').forEach(el=>{
+        el.onclick = ()=>openBannerModal((state.banners||[]).find(b=>b.id===el.getAttribute('data-edit-banner')));
+      });
+      root.querySelectorAll('[data-toggle-banner]').forEach(el=>{
+        el.onclick = ()=>toggleBannerActive(el.getAttribute('data-toggle-banner'), el.getAttribute('data-active')==='1');
+      });
+      root.querySelectorAll('[data-delete-banner]').forEach(el=>{
+        el.onclick = ()=>deleteBanner(el.getAttribute('data-delete-banner'));
+      });
+      const bannerLinkTypeSelect = document.getElementById('banner-linkType');
+      const bannerLinkValueField = document.getElementById('banner-linkValue-field');
+      if(bannerLinkTypeSelect && bannerLinkValueField){
+        bannerLinkTypeSelect.onchange = ()=>{
+          bannerLinkValueField.style.display = bannerLinkTypeSelect.value==='none' ? 'none' : '';
+        };
+      }
+      const bannerImageFile = document.getElementById('banner-image-file');
+      if(bannerImageFile) bannerImageFile.onchange = async ()=>{
+        const file = bannerImageFile.files && bannerImageFile.files[0];
+        if(!file) return;
+        const statusEl = document.getElementById('banner-upload-status');
+        if(statusEl) statusEl.textContent = 'Enviando…';
+        const reader = new FileReader();
+        reader.onload = async ()=>{
+          const result = await api('POST', '/api/admin/banners/upload-image', {dataUrl: reader.result});
+          if(result.error){
+            if(statusEl) statusEl.textContent = '❌ ' + result.error;
+            return;
+          }
+          const hiddenInput = document.getElementById('banner-imageUrl');
+          const preview = document.getElementById('banner-image-preview');
+          if(hiddenInput) hiddenInput.value = result.url;
+          if(preview){ preview.src = result.url; preview.style.display = ''; }
+          if(statusEl) statusEl.textContent = '✓ Imagem enviada';
+          if(state.bannerModal) state.bannerModal.imageUrl = result.url;
+        };
+        reader.readAsDataURL(file);
+      };
+      const confirmBanner = document.getElementById('btn-confirm-banner');
+      if(confirmBanner) confirmBanner.onclick = ()=>{
+        const m = state.bannerModal;
+        m.imageUrl = (document.getElementById('banner-imageUrl')||{}).value || '';
+        m.audience = (document.getElementById('banner-audience')||{}).value || 'both';
+        m.size = (document.getElementById('banner-size')||{}).value || 'grande';
+        m.linkType = (document.getElementById('banner-linkType')||{}).value || 'none';
+        m.linkValue = (document.getElementById('banner-linkValue')||{}).value || '';
+        const startVal = (document.getElementById('banner-startAt')||{}).value;
+        const endVal = (document.getElementById('banner-endAt')||{}).value;
+        m.startAt = startVal ? new Date(startVal).getTime() : null;
+        m.endAt = endVal ? new Date(endVal).getTime() : null;
+        m.priority = Number((document.getElementById('banner-priority')||{}).value) || 0;
+        m.active = !!(document.getElementById('banner-active')||{}).checked;
+        saveBanner();
+      };
+      const cancelBanner = document.getElementById('btn-cancel-banner');
+      if(cancelBanner) cancelBanner.onclick = closeBannerModal;
+    }
+  }
+
+  // ---------- init ----------
+  (async function init(){
+    if(state.token){
+      // Validate the stored token by trying to load the summary — if it's
+      // stale/expired, api() already bounces us back to the login screen.
+      state.screen = 'dash';
+      const result = await api('GET', '/api/admin/summary');
+      if(result.error){ render(); return; }
+      state.summary = result;
+      await loadAll();
+      render();
+      startPolling();
+      return;
+    }
+    render();
+  })();
+})();
+</script>
+</body>
+</html>
