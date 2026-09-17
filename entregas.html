@@ -1046,6 +1046,9 @@
     border-radius:18px; overflow:hidden;
     box-shadow:0 20px 60px rgba(0,0,0,0.5);
   }
+  .banner-modal-box-small{
+    max-width:260px;
+  }
   .banner-modal-image{
     display:block; width:100%; height:auto; cursor:pointer;
   }
@@ -2316,7 +2319,7 @@
   // Só pro motivo de emergência — WhatsApp resolve na hora, sem esperar
   // alguém ver o chamado interno. TODO: coloque aqui o número de WhatsApp
   // real do suporte (com DDI+DDD, só números).
-  const SUPPORT_WHATSAPP_NUMBER = '5519987715042';
+  const SUPPORT_WHATSAPP_NUMBER = '5500000000000';
   function openSupportModal(orderId){
     // orderId null = chamado geral (fora de uma corrida ativa)
     state.supportModal = {orderId: orderId||null, reason:null, note:''};
@@ -3420,7 +3423,7 @@
     wrap.className = 'banner-modal-overlay';
     wrap.id = 'banner-modal-overlay';
     wrap.innerHTML = `
-      <div class="banner-modal-box">
+      <div class="banner-modal-box${b.size==='pequeno'?' banner-modal-box-small':''}">
         <button class="banner-modal-close" id="banner-modal-close">✕</button>
         <img class="banner-modal-image" id="banner-modal-image" src="${esc(b.imageUrl)}" alt="">
       </div>
@@ -3943,6 +3946,7 @@
     if(bannerClose) bannerClose.onclick = (e)=>{ e.stopPropagation(); setState({activeBanner:null}); };
     const bannerImage = $('#banner-modal-image');
     if(bannerImage) bannerImage.onclick = ()=>{ openBannerLink(state.activeBanner); setState({activeBanner:null}); };
+    if(bannerImage) bannerImage.onerror = ()=>{ setState({activeBanner:null}); };
 
     root.querySelectorAll('[data-accept]').forEach(elm=>{
       elm.onclick = ()=>acceptOrder(elm.getAttribute('data-accept'));

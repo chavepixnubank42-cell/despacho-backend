@@ -739,12 +739,14 @@ app.patch('/api/admin/motoboys/:id/details', requireAuth('admin'), (req, res) =>
 // ---------------------------------------------------------------
 const BANNER_AUDIENCES = ['motoboy', 'business', 'both'];
 const BANNER_LINK_TYPES = ['none', 'external', 'internal'];
+const BANNER_SIZES = ['grande', 'pequeno'];
 
 function sanitizeBannerInput(body, existing) {
   const b = existing ? Object.assign({}, existing) : {};
   if (typeof body.imageUrl === 'string') b.imageUrl = body.imageUrl.trim();
   if (typeof body.audience === 'string' && BANNER_AUDIENCES.includes(body.audience)) b.audience = body.audience;
   if (typeof body.linkType === 'string' && BANNER_LINK_TYPES.includes(body.linkType)) b.linkType = body.linkType;
+  if (typeof body.size === 'string' && BANNER_SIZES.includes(body.size)) b.size = body.size;
   if (typeof body.linkValue === 'string') b.linkValue = body.linkValue.trim();
   if (typeof body.active === 'boolean') b.active = body.active;
   if (typeof body.priority === 'number' && Number.isFinite(body.priority)) b.priority = body.priority;
@@ -773,6 +775,7 @@ app.post('/api/admin/banners', requireAuth('admin'), (req, res) => {
     audience: 'both',
     linkType: 'none',
     linkValue: '',
+    size: 'grande',
     active: true,
     priority: 0,
     startAt: null,
