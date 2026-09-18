@@ -1696,7 +1696,7 @@
       roundTrip: !!data.roundTrip
     });
     if(result.error){ showToast(result.error); return; }
-    setState({modal:null, newOrderDeliveryCoords:null, newOrderFormSnapshot:null});
+    setState({modal:null, newOrderDeliveryCoords:null, newOrderDeliveryPrecise:null, newOrderFormSnapshot:null});
     await refreshOrders();
     render();
     showToast(result.offerQueue && result.offerQueue.length>0
@@ -1907,6 +1907,7 @@
     const {lat, lng} = locationPickerMap.getCenter();
     if(state.locationPickerMode === 'order-delivery'){
       state.newOrderDeliveryCoords = {lat, lng};
+      state.newOrderDeliveryPrecise = true; // a mão humana ajustando o pino é a fonte mais confiável que existe
       closeLocationPicker();
       showToast('✅ Local de entrega marcado no mapa');
       return;
@@ -2004,6 +2005,7 @@
         const hintEl = document.getElementById('new-order-delivery-precision');
         if(addressInput) addressInput.value = r.label;
         state.newOrderDeliveryCoords = {lat: r.lat, lng: r.lng};
+        state.newOrderDeliveryPrecise = !!r.fromRecent || r.hasHouseNumber !== false;
         if(hintEl){
           const note = r.fromRecent
             ? '📍 Endereço já usado antes — localização salva, sem precisar ajustar'
@@ -2121,16 +2123,41 @@
   let liveGeo = null;     // {lat, lng, acc} — most recent fix
   let geoState = 'idle';  // idle | locating | ok | denied | unsupported
 
+  // Smooths raw GPS fixes so the on-screen dot doesn't jump around —
+  // blends each new reading with the previous one, weighted by how
+  // accurate the device says each reading is.
+  class KalmanGeoFilter {
+    constructor(){ this.lat=null; this.lng=null; this.variance=-1; }
+    filter(lat, lng, accuracy){
+      const Q = 3; // how much we trust the rider may have moved since the last fix
+      const acc = Math.max(accuracy, 1); // avoid divide-by-zero on a 0m accuracy report
+      if(this.variance < 0){
+        this.lat = lat; this.lng = lng; this.variance = acc*acc;
+      } else {
+        this.variance += Q;
+        const K = this.variance / (this.variance + acc*acc); // Kalman gain
+        this.lat += K * (lat - this.lat);
+        this.lng += K * (lng - this.lng);
+        this.variance = (1-K) * this.variance;
+      }
+      return {lat:this.lat, lng:this.lng};
+    }
+    reset(){ this.lat=null; this.lng=null; this.variance=-1; }
+  }
+  const geoFilter = new KalmanGeoFilter();
+
   function ensureGeoWatch(orderId, phase){
     const key = orderId + ':' + phase;
     if(geoWatchKey === key && geoWatchId !== null) return; // already watching the right thing
     stopGeoWatch();
     geoWatchKey = key;
+    geoFilter.reset(); // don't blend fixes across different rides/phases
     if(!navigator.geolocation){ geoState = 'unsupported'; return; }
     geoState = 'locating';
     geoWatchId = navigator.geolocation.watchPosition(
       pos => {
-        liveGeo = {lat:pos.coords.latitude, lng:pos.coords.longitude, acc:Math.round(pos.coords.accuracy)};
+        const smoothed = geoFilter.filter(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
+        liveGeo = {lat:smoothed.lat, lng:smoothed.lng, acc:Math.round(pos.coords.accuracy)};
         geoState = 'ok';
       },
       err => {
@@ -3815,7 +3842,7 @@
     };
 
     const btnNewOrder = $('#btn-new-order');
-    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderFormSnapshot:null});
+    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderDeliveryPrecise:null, newOrderFormSnapshot:null});
 
     const modalClose = $('#modal-close');
     if(modalClose) modalClose.onclick = ()=>setState({modal:null});
@@ -3902,6 +3929,15 @@
         }
         if(!value || value <= 0){
           showToast('Informe um valor válido para a corrida');
+          return;
+        }
+        // Se a busca de endereço não achou o número exato da casa e o
+        // comerciante não ajustou o pino manualmente, bloqueia o envio —
+        // é melhor pedir um segundo pra confirmar do que o motoboy chegar
+        // no endereço errado.
+        if(state.newOrderDeliveryPrecise === false){
+          showToast('⚠️ Não encontramos o número exato desse endereço. Toque em "ajustar pino" e confirme o local certo no mapa antes de enviar.');
+          openLocationPicker('order-delivery');
           return;
         }
         btnSubmitOrder.disabled = true;
