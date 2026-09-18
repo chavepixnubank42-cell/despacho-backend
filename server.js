@@ -112,12 +112,34 @@ function notifyOfferedMotoboy(db, o) {
 }
 
 // ---------------------------------------------------------------
-// Geocoding (Nominatim/OpenStreetMap) — turns an address into lat/lng so
-// we can later check how far the motoboy really is from it.
+// Geocoding — turns an address into lat/lng so we can later check how far
+// the motoboy really is from it.
+//
+// Three providers are supported, tried in this priority order based on
+// which env vars are set in Railway (Variables tab) — no code change
+// needed to switch:
+//   1. Google Geocoding/Places (GOOGLE_MAPS_API_KEY) — best house-number
+//      coverage, but requires a billing account and bills above its free
+//      monthly quota.
+//   2. LocationIQ (LOCATIONIQ_API_KEY) — free (5,000 requests/day, no
+//      credit card), good house-number coverage in Brazil. Uses the same
+//      response format as Nominatim, so it reuses that parsing.
+//   3. Nominatim/OpenStreetMap (no key needed) — the original default,
+//      used automatically when neither key above is set.
+// To go back to a previous provider, just remove the env var that
+// activated the one you want to stop using.
 // ---------------------------------------------------------------
 
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
+const LOCATIONIQ_API_KEY = process.env.LOCATIONIQ_API_KEY || '';
+const USE_GOOGLE_GEOCODING = !!GOOGLE_MAPS_API_KEY;
+const USE_LOCATIONIQ = !USE_GOOGLE_GEOCODING && !!LOCATIONIQ_API_KEY;
+
 // Nominatim's usage policy caps public requests at ~1/second, so we queue
-// them and only ever have one in flight, spaced a second apart.
+// them and only ever have one in flight, spaced a second apart. LocationIQ's
+// free plan allows 2/second, so the same 1s spacing comfortably respects
+// it too. Google has no such requirement, so this throttle is skipped when
+// using Google.
 let geocodeChain = Promise.resolve();
 function throttledFetch(url, options) {
   const run = geocodeChain.then(async () => {
@@ -137,12 +159,26 @@ async function geocodeAddress(address) {
   if (db.geocodeCache[key] !== undefined) return db.geocodeCache[key];
 
   try {
-    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=' + encodeURIComponent(address);
-    const res = await throttledFetch(url, {
-      headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
-    });
-    const data = await res.json();
-    const coords = data && data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null;
+    let coords = null;
+    if (USE_GOOGLE_GEOCODING) {
+      const url = 'https://maps.googleapis.com/maps/api/geocode/json?region=br&address=' + encodeURIComponent(address) + '&key=' + GOOGLE_MAPS_API_KEY;
+      const res = await fetch(url);
+      const data = await res.json();
+      const top = data && data.status === 'OK' && data.results && data.results[0];
+      coords = top ? { lat: top.geometry.location.lat, lng: top.geometry.location.lng } : null;
+    } else if (USE_LOCATIONIQ) {
+      const url = 'https://us1.locationiq.com/v1/search?key=' + LOCATIONIQ_API_KEY + '&format=json&limit=1&addressdetails=1&countrycodes=br&q=' + encodeURIComponent(address);
+      const res = await throttledFetch(url, { headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' } });
+      const data = await res.json();
+      coords = data && data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null;
+    } else {
+      const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=' + encodeURIComponent(address);
+      const res = await throttledFetch(url, {
+        headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
+      });
+      const data = await res.json();
+      coords = data && data[0] ? { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) } : null;
+    }
     const db2 = loadDB();
     db2.geocodeCache = db2.geocodeCache || {};
     db2.geocodeCache[key] = coords; // cache the miss too, so we don't retry a bad address every time
@@ -161,15 +197,38 @@ async function geocodeAddress(address) {
 // since it's a one-off interactive lookup rather than something reused
 // every time an order is created.
 //
-// `addressdetails=1` lets us tell whether Nominatim actually matched a
-// house number or only snapped to the street itself — Brazilian OSM data
-// often lacks per-building numbers on smaller streets, in which case the
-// pin lands at roughly the middle of the street instead of the right
-// door. `hasHouseNumber` on each result lets the front-end warn the
-// person to double-check/drag the pin in that case, instead of silently
-// trusting an approximate match as if it were exact.
+// `hasHouseNumber` tells the front-end whether the match actually pinned
+// down to a specific building or only snapped to the street — Brazilian
+// OSM data often lacks per-building numbers on smaller streets, in which
+// case the pin lands at roughly the middle of the street instead of the
+// right door. Google and LocationIQ both cover house numbers more
+// completely than plain Nominatim, so hasHouseNumber comes back true much
+// more often with either of those set up.
 async function geocodeSearch(query) {
   if (!query || !query.trim()) return [];
+  if (USE_GOOGLE_GEOCODING) {
+    const url = 'https://maps.googleapis.com/maps/api/geocode/json?region=br&components=country:BR&address=' + encodeURIComponent(query) + '&key=' + GOOGLE_MAPS_API_KEY;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data || data.status !== 'OK') return [];
+    return (data.results || []).slice(0, 5).map((r) => ({
+      label: r.formatted_address,
+      lat: r.geometry.location.lat,
+      lng: r.geometry.location.lng,
+      hasHouseNumber: (r.address_components || []).some((c) => c.types.includes('street_number'))
+    }));
+  }
+  if (USE_LOCATIONIQ) {
+    const url = 'https://us1.locationiq.com/v1/search?key=' + LOCATIONIQ_API_KEY + '&format=json&limit=5&addressdetails=1&countrycodes=br&q=' + encodeURIComponent(query);
+    const res = await throttledFetch(url, { headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' } });
+    const data = await res.json();
+    return (Array.isArray(data) ? data : []).map((r) => ({
+      label: r.display_name,
+      lat: parseFloat(r.lat),
+      lng: parseFloat(r.lon),
+      hasHouseNumber: !!(r.address && r.address.house_number)
+    }));
+  }
   const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&countrycodes=br&q=' + encodeURIComponent(query);
   const res = await throttledFetch(url, {
     headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
@@ -188,6 +247,27 @@ async function geocodeSearch(query) {
 // map, the front-end asks "what's under the pin now?" so it can show the
 // street name live, instead of leaving them staring at a blank map.
 async function reverseGeocode(lat, lng) {
+  if (USE_GOOGLE_GEOCODING) {
+    const url = 'https://maps.googleapis.com/maps/api/geocode/json?latlng=' + lat + ',' + lng + '&key=' + GOOGLE_MAPS_API_KEY;
+    const res = await fetch(url);
+    const data = await res.json();
+    const top = data && data.status === 'OK' && data.results && data.results[0];
+    if (!top) return { label: null, hasHouseNumber: false };
+    return {
+      label: top.formatted_address || null,
+      hasHouseNumber: (top.address_components || []).some((c) => c.types.includes('street_number'))
+    };
+  }
+  if (USE_LOCATIONIQ) {
+    const url = 'https://us1.locationiq.com/v1/reverse?key=' + LOCATIONIQ_API_KEY + '&format=json&zoom=18&addressdetails=1&lat=' + lat + '&lon=' + lng;
+    const res = await throttledFetch(url, { headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' } });
+    const data = await res.json();
+    if (!data || data.error) return { label: null, hasHouseNumber: false };
+    return {
+      label: data.display_name || null,
+      hasHouseNumber: !!(data.address && data.address.house_number)
+    };
+  }
   const url = 'https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&addressdetails=1&lat=' + lat + '&lon=' + lng;
   const res = await throttledFetch(url, {
     headers: { 'User-Agent': 'ChegoJaApp/1.0 (app de entregas por moto)' }
