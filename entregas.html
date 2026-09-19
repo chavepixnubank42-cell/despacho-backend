@@ -1789,6 +1789,33 @@
   // Aqui usamos o GPS só como ponto de partida do mapa; quem decide onde
   // fica o pino de verdade é o comerciante, olhando o mapa.
   let locationPickerMap = null;
+  // ---------- motoboy home map (own live position + destination pin) ----------
+  // Full re-renders happen every ~3s via polling (see startPolling below), and
+  // render() always does root.innerHTML='' — so if we naively re-created this
+  // Leaflet map on every render, it would flicker and reset pan/zoom every few
+  // seconds. Instead we keep the actual container element alive across
+  // renders in this variable, and on each render swap it back into place
+  // instead of using the fresh empty placeholder — the same container, same
+  // map instance, same zoom/pan, just re-attached under the new DOM tree.
+  let motoboyHomeMap = null;
+  let motoboyHomeMapContainer = null;
+  let motoboyHomeMarker = null;
+  let motoboyTargetMarker = null;
+  let currentMotoboyActiveOrder = null; // definido a cada render de renderMotoboyDash
+  function initMotoboyHomeMap(){
+    if(typeof L === 'undefined') return; // sem internet na primeira carga, por exemplo
+    const start = liveGeo || {lat:-21.857592, lng:-47.477454}; // fallback: Porto Ferreira, até termos um fix de GPS
+    motoboyHomeMap = L.map('motoboy-home-map', {attributionControl:false, zoomControl:false}).setView([start.lat, start.lng], liveGeo ? 16 : 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(motoboyHomeMap);
+    setTimeout(()=>{ if(motoboyHomeMap) motoboyHomeMap.invalidateSize(); }, 50);
+  }
+  function teardownMotoboyHomeMap(){
+    if(motoboyHomeMap){ try{ motoboyHomeMap.remove(); }catch(e){} }
+    motoboyHomeMap = null;
+    motoboyHomeMapContainer = null;
+    motoboyHomeMarker = null;
+    motoboyTargetMarker = null;
+  }
 
   // mode: 'business' (marca a localização fixa da loja, salva no perfil) ou
   // 'order-delivery' (marca só a coordenada de entrega desta corrida, usada
@@ -2469,6 +2496,24 @@
 
     root.appendChild(wrap);
 
+    // Precisa vir DEPOIS do root.appendChild(wrap) acima — antes disso o
+    // placeholder do mapa ainda não está de fato no documento, então
+    // document.getElementById não o encontra e essa lógica não fazia nada.
+    if(state.screen==='motoboy-dash'){
+      const placeholder = document.getElementById('motoboy-home-map');
+      if(placeholder){
+        if(motoboyHomeMap && motoboyHomeMapContainer && motoboyHomeMapContainer !== placeholder){
+          placeholder.replaceWith(motoboyHomeMapContainer); // reaproveita o mapa já existente, em vez do placeholder vazio novo
+          motoboyHomeMap.invalidateSize();
+        } else if(!motoboyHomeMap){
+          motoboyHomeMapContainer = placeholder;
+          initMotoboyHomeMap();
+        }
+      }
+    } else if(motoboyHomeMap){
+      teardownMotoboyHomeMap(); // saiu do painel do motoboy — não deixa o mapa "vivo" sem tela nenhuma usando ele
+    }
+
     if(state.screen==='motoboy-dash' && state.incomingAlert){
       const spacer = document.createElement('div');
       spacer.style.height = '54px';
@@ -3123,7 +3168,15 @@
     const ganho = sumMoney(finalizadas, o=>o.value);
     // Only one active ride at a time.
     const activeOrder = ativa[0] || null;
-    if(!activeOrder) stopGeoWatch();
+    currentMotoboyActiveOrder = activeOrder; // lido pelo loop de 1s que atualiza os pinos do mapa da tela inicial
+    // Keep a live GPS fix even with no active ride — it's what feeds the
+    // little map at the top of this screen (own position). Once a ride
+    // becomes active, renderGpsLock's own ensureGeoWatch call takes over
+    // with the order-specific key; here we only handle the "idle" case.
+    if(!activeOrder){
+      if(online) ensureGeoWatch('home', 'idle');
+      else stopGeoWatch();
+    }
 
     // If the ride that WAS active a moment ago just vanished, and we're now
     // in a forced pause, it's because the pickup window expired — the
@@ -3144,6 +3197,8 @@
         <button class="status-btn is-pausado ${curStatus==='pausado'?'active':''}" data-set-status="pausado">🟡 Pausado</button>
         <button class="status-btn is-offline ${curStatus==='offline'?'active':''}" data-set-status="offline">⚪ Off-line</button>
       </div>
+      <div id="motoboy-home-map" style="height:200px;border-radius:14px;overflow:hidden;margin-bottom:16px;background:#1c1f1c;"></div>
+      ${!liveGeo && online ? '<div class="field-hint" style="margin-top:-10px;margin-bottom:16px;">📡 Obtendo sua localização…</div>' : ''}
       ${curStatus==='pausado' && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()
         ? `<div class="field-hint" style="margin-bottom:16px;color:#FF6A6A;">⏸️ Pausa automática: você perdeu a última corrida por não chegar a tempo na retirada. Você volta a poder ficar on-line <span id="forced-pause-countdown" data-until="${state.profile.forcedPauseUntil}">em instantes</span>.</div>`
         : curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
@@ -4185,6 +4240,40 @@
         }
       }
     }
+    // Motoboy home map — own position marker + destination pin, updated
+    // straight on the map instance (no full re-render needed for this).
+    if(motoboyHomeMap){
+      if(liveGeo){
+        const latlng = [liveGeo.lat, liveGeo.lng];
+        if(!motoboyHomeMarker){
+          motoboyHomeMarker = L.circleMarker(latlng, {radius:9, color:'#0b3d0b', weight:3, fillColor:'#2ecc40', fillOpacity:1}).addTo(motoboyHomeMap);
+          motoboyHomeMap.setView(latlng, 16);
+        } else {
+          motoboyHomeMarker.setLatLng(latlng);
+        }
+      }
+      // Which coordinate is the "destination" depends on the current leg
+      // of the active ride — pickup while heading there or coming back,
+      // delivery once the pickup is done.
+      let target = null;
+      const ao = currentMotoboyActiveOrder;
+      if(ao){
+        if(ao.status === 'aceito' || ao.status === 'no_local_retirada' || ao.status === 'retornando') target = ao.pickupCoords;
+        else if(ao.status === 'em_entrega' || ao.status === 'no_local_entrega') target = ao.deliveryCoords;
+      }
+      if(target){
+        const tll = [target.lat, target.lng];
+        if(!motoboyTargetMarker){
+          motoboyTargetMarker = L.marker(tll, {title:'Destino'}).addTo(motoboyHomeMap);
+        } else {
+          motoboyTargetMarker.setLatLng(tll);
+        }
+      } else if(motoboyTargetMarker){
+        motoboyHomeMap.removeLayer(motoboyTargetMarker);
+        motoboyTargetMarker = null;
+      }
+    }
+
   }, 1000);
 
   // Try to keep audio unlocked on every tap — some browsers re-suspend the
