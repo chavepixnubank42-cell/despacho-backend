@@ -1,143 +1,187 @@
-// Simple JSON-file database. No external database service needed —
-// everything is stored in data.json next to this file.
+// Database layer. Two modes, chosen automatically:
 //
-// This is fine for a small operation (one city, a handful of businesses
-// and motoboys) running as a SINGLE server process (which is how Railway
-// runs a small app by default). If the app grows a lot — or ever runs as
-// multiple server instances — swap this file for a real database
-// (Postgres, MySQL, etc.); the rest of server.js doesn't need to change
-// much since it only calls loadDB()/saveDB().
+// 1. SUPABASE / POSTGRES (used whenever DATABASE_URL is set — e.g. in
+//    production on Render). The whole app state (businesses, motoboys,
+//    orders, banners, generalTickets) is stored as ONE jsonb blob in a
+//    single row of the `app_state` table. This keeps the exact same
+//    in-memory shape the rest of server.js already expects — server.js
+//    only ever calls loadDB()/saveDB(), so nothing else needs to change.
 //
-// Two safety measures, both fixing real data-loss bugs found in testing:
+// 2. LOCAL JSON FILE (used when DATABASE_URL is NOT set — e.g. running
+//    on your own machine without a database). Same behavior as before:
+//    everything lives in data.json next to this file.
+//
+// Two safety measures carried over from the file-based version, both
+// fixing real data-loss bugs found in testing:
 //
 // 1. IN-MEMORY CACHE — loadDB() always returns the SAME shared object
-//    instead of re-reading the file from disk on every call. Without
-//    this, two requests handled close together (e.g. two orders created
-//    within the same instant) could each read an independent snapshot,
-//    make their own change, and save it back — with the second save
-//    silently overwriting the first request's change. Since Node runs
-//    one request's synchronous code at a time, every request mutating
-//    the one shared in-memory object (instead of independent copies)
-//    means concurrent changes are never lost.
+//    instead of re-reading on every call. Since Node runs one request's
+//    synchronous code at a time, every request mutating the one shared
+//    in-memory object means concurrent changes are never lost.
 //
-// 2. ATOMIC WRITE-THEN-RENAME — saveDB() writes the new data to a temp
-//    file first, and only swaps it into place with an OS-level rename
-//    once that write finishes completely. A rename is effectively
-//    instantaneous, so a reader can never see a half-written file, and a
-//    crash mid-write can't leave data.json corrupted — worst case it's
-//    still the previous, complete version. A one-generation backup
-//    (data.json.bak) is also kept for manual recovery if ever needed.
+// 2. SERIALIZED, QUEUED WRITES — saveDB() pushes writes into a queue so
+//    two saves never race each other, whether writing to disk (atomic
+//    write-then-rename) or to Postgres (sequential UPDATEs).
 
 const fs = require('fs');
 const path = require('path');
-
-// DATA_DIR lets you point data.json at a persistent disk instead of the
-// app's own folder. This matters on Railway (and most hosts): every new
-// deploy builds a fresh container from what's in GitHub, which does NOT
-// include data.json (it's generated at runtime) — so without a
-// persistent volume, businesses/motoboys/credits get wiped on every
-// deploy. Attaching a Railway Volume to this service automatically sets
-// RAILWAY_VOLUME_MOUNT_PATH — we use that first, so nothing extra needs
-// to be configured by hand. DATA_DIR still works too, if set explicitly
-// (takes priority — useful for local testing or a different host).
-// Defaults to this folder (no persistence) so nothing changes for local use.
-const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
-const DB_PATH = path.join(DATA_DIR, 'data.json');
-const TMP_PATH = DB_PATH + '.tmp';
-const BAK_PATH = DB_PATH + '.bak';
 
 function emptyDB() {
   return { businesses: {}, motoboys: {}, orders: {}, banners: {}, generalTickets: {} };
 }
 
-function tryParse(raw) {
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    return null;
-  }
+function withDefaults(db) {
+  if (!db.banners) db.banners = {};
+  if (!db.generalTickets) db.generalTickets = {};
+  return db;
 }
 
-function loadFromDisk() {
-  if (!fs.existsSync(DB_PATH)) {
+let cache = null;
+let saveDBImpl;
+let initDBImpl;
+
+if (process.env.DATABASE_URL) {
+  // ---------- SUPABASE / POSTGRES MODE ----------
+  const { Pool } = require('pg');
+
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    // Supabase's pooled connection requires SSL; it uses a certificate
+    // that Node doesn't have in its default trust store, so we disable
+    // strict verification (same approach Supabase's own docs recommend
+    // for typical app servers).
+    ssl: { rejectUnauthorized: false },
+  });
+
+  async function ensureTable() {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS app_state (
+        id INT PRIMARY KEY DEFAULT 1,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    const { rows } = await pool.query('SELECT data FROM app_state WHERE id = 1');
+    if (rows.length === 0) {
+      const initial = emptyDB();
+      await pool.query('INSERT INTO app_state (id, data) VALUES (1, $1)', [initial]);
+      return initial;
+    }
+    return withDefaults(rows[0].data);
+  }
+
+  initDBImpl = async function initDB() {
+    cache = await ensureTable();
+    console.log('Banco de dados: conectado ao Supabase (Postgres).');
+    return cache;
+  };
+
+  let writeQueue = Promise.resolve();
+  saveDBImpl = function saveDB(db) {
+    cache = db;
+    const json = cache;
+    writeQueue = writeQueue
+      .catch(() => {}) // a previous failed write must never jam future writes
+      .then(() =>
+        pool.query('UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1', [json])
+      )
+      .catch((e) => {
+        console.error('Erro ao salvar no Supabase:', e.message);
+      });
+    return writeQueue;
+  };
+} else {
+  // ---------- LOCAL JSON FILE MODE (fallback for local dev) ----------
+  const DATA_DIR = process.env.DATA_DIR || __dirname;
+  const DB_PATH = path.join(DATA_DIR, 'data.json');
+  const TMP_PATH = DB_PATH + '.tmp';
+  const BAK_PATH = DB_PATH + '.bak';
+
+  function tryParse(raw) {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function loadFromDisk() {
+    if (!fs.existsSync(DB_PATH)) {
+      const initial = emptyDB();
+      fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
+      return initial;
+    }
+    const parsed = tryParse(fs.readFileSync(DB_PATH, 'utf8'));
+    if (parsed) return parsed;
+
+    console.error('data.json corrompido ao ler — tentando recuperar do backup (data.json.bak)...');
+    if (fs.existsSync(BAK_PATH)) {
+      const backupParsed = tryParse(fs.readFileSync(BAK_PATH, 'utf8'));
+      if (backupParsed) {
+        console.error('Recuperado com sucesso a partir do backup — restaurando data.json.');
+        fs.writeFileSync(DB_PATH, JSON.stringify(backupParsed, null, 2));
+        return backupParsed;
+      }
+      console.error('O backup também estava corrompido.');
+    } else {
+      console.error('Nenhum backup encontrado.');
+    }
+    console.error('Recriando data.json do zero — dados anteriores podem ter sido perdidos.');
     const initial = emptyDB();
     fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
     return initial;
   }
 
-  const parsed = tryParse(fs.readFileSync(DB_PATH, 'utf8'));
-  if (parsed) return parsed;
+  initDBImpl = async function initDB() {
+    cache = withDefaults(loadFromDisk());
+    console.log('Banco de dados: usando arquivo local (' + DB_PATH + ') — sem DATABASE_URL configurada.');
+    return cache;
+  };
 
-  console.error('data.json corrompido ao ler — tentando recuperar do backup (data.json.bak)...');
-  if (fs.existsSync(BAK_PATH)) {
-    const backupParsed = tryParse(fs.readFileSync(BAK_PATH, 'utf8'));
-    if (backupParsed) {
-      console.error('Recuperado com sucesso a partir do backup — restaurando data.json.');
-      fs.writeFileSync(DB_PATH, JSON.stringify(backupParsed, null, 2));
-      return backupParsed;
-    }
-    console.error('O backup também estava corrompido.');
-  } else {
-    console.error('Nenhum backup encontrado.');
-  }
-
-  console.error('Recriando data.json do zero — dados anteriores podem ter sido perdidos.');
-  const initial = emptyDB();
-  fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
-  return initial;
+  let writeQueue = Promise.resolve();
+  saveDBImpl = function saveDB(db) {
+    cache = db;
+    const json = JSON.stringify(cache, null, 2);
+    writeQueue = writeQueue
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise((resolve, reject) => {
+            fs.writeFile(TMP_PATH, json, (err) => {
+              if (err) return reject(err);
+              try {
+                if (fs.existsSync(DB_PATH)) fs.copyFileSync(DB_PATH, BAK_PATH);
+              } catch (e) {
+                /* backup is a nice-to-have, never fatal */
+              }
+              fs.rename(TMP_PATH, DB_PATH, (err2) => {
+                if (err2) reject(err2);
+                else resolve();
+              });
+            });
+          })
+      )
+      .catch((e) => {
+        console.error('Erro ao salvar data.json:', e.message);
+      });
+    return writeQueue;
+  };
 }
-
-// The one shared in-memory copy — loaded from disk once, then mutated in
-// place by every request from then on.
-let cache = null;
 
 function loadDB() {
-  if (!cache) cache = loadFromDisk();
-  // Old data.json files (from before banners/generalTickets existed) won't
-  // have these keys — add them in place so the rest of the code can always
-  // assume they're there.
-  if (!cache.banners) cache.banners = {};
-  if (!cache.generalTickets) cache.generalTickets = {};
-  return cache;
+  // By the time any route handler runs, initDB() has already populated
+  // the cache once at startup (see server.js) — this just hands out the
+  // same shared in-memory object every time, exactly like before.
+  if (!cache) cache = emptyDB();
+  return withDefaults(cache);
 }
 
-// Serializes the actual disk writes (so two saves can't race each other's
-// file I/O) and makes each one atomic via write-then-rename.
-let writeQueue = Promise.resolve();
 function saveDB(db) {
-  // db is expected to be the same object loadDB() handed out (mutated in
-  // place) — this just makes sure the cache and the argument never drift.
-  cache = db;
-  const json = JSON.stringify(cache, null, 2);
-
-  writeQueue = writeQueue
-    .catch(() => {}) // a previous failed write must never jam future writes
-    .then(
-      () =>
-        new Promise((resolve, reject) => {
-          fs.writeFile(TMP_PATH, json, (err) => {
-            if (err) return reject(err);
-            // Best-effort one-generation backup of the last known-good file.
-            // At this point data.json still holds the PREVIOUS complete
-            // version (we haven't swapped the new one in yet), so this
-            // copy always reads a stable, complete file.
-            try {
-              if (fs.existsSync(DB_PATH)) fs.copyFileSync(DB_PATH, BAK_PATH);
-            } catch (e) {
-              /* backup is a nice-to-have, never fatal */
-            }
-            // Atomic swap — this is the step that actually prevents corruption.
-            fs.rename(TMP_PATH, DB_PATH, (err2) => {
-              if (err2) reject(err2);
-              else resolve();
-            });
-          });
-        })
-    )
-    .catch((e) => {
-      console.error('Erro ao salvar data.json:', e.message);
-    });
-  return writeQueue;
+  return saveDBImpl(db);
 }
 
-module.exports = { loadDB, saveDB, DATA_DIR };
+async function initDB() {
+  return initDBImpl();
+}
+
+module.exports = { loadDB, saveDB, initDB };

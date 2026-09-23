@@ -4,8 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 const webpush = require('web-push');
-const fs = require('fs');
-const { loadDB, saveDB, DATA_DIR } = require('./db');
+const { loadDB, saveDB, initDB } = require('./db');
 
 const app = express();
 app.use(cors());
@@ -903,12 +902,10 @@ app.get('/api/banners', requireAuth('motoboy', 'business'), (req, res) => {
 
 // Banner image upload — the admin picks a file, the browser reads it as
 // base64 and posts it here as plain JSON (no multipart/form-data library
-// needed). Saved under DATA_DIR/uploads, which lives on the same
-// persistent Volume as data.json, so uploaded banners survive redeploys
-// too. Served back out by the /uploads/:file route right below.
-const UPLOADS_DIR = require('path').join(DATA_DIR, 'uploads');
-try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) { /* already exists */ }
-
+// needed). We just validate it and hand the same base64 data URL back —
+// it gets stored directly on the banner object (imageUrl) and persisted
+// along with the rest of the app state, so it survives redeploys without
+// needing any separate file storage.
 const ALLOWED_IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const MAX_UPLOAD_BYTES = 6 * 1024 * 1024; // 6MB
 
@@ -922,20 +919,7 @@ app.post('/api/admin/banners/upload-image', requireAuth('admin'), (req, res) => 
   if (!ext) return res.status(400).json({ error: 'Use uma imagem JPG, PNG, WEBP ou GIF' });
   const buffer = Buffer.from(match[2], 'base64');
   if (buffer.length > MAX_UPLOAD_BYTES) return res.status(400).json({ error: 'Imagem muito grande (máximo 6MB)' });
-  const filename = uuidv4() + '.' + ext;
-  fs.writeFile(require('path').join(UPLOADS_DIR, filename), buffer, (err) => {
-    if (err) return res.status(500).json({ error: 'Erro ao salvar a imagem' });
-    res.json({ url: '/uploads/' + filename });
-  });
-});
-
-app.get('/uploads/:filename', (req, res) => {
-  // Filename is always one we generated ourselves (uuid + known
-  // extension), but sanitize anyway before touching the filesystem.
-  const safe = require('path').basename(req.params.filename);
-  res.sendFile(require('path').join(UPLOADS_DIR, safe), (err) => {
-    if (err) res.status(404).end();
-  });
+  res.json({ url: dataUrl });
 });
 
 
@@ -2436,4 +2420,14 @@ app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.ht
 app.get('/api', (req, res) => res.send('ChegouJá API rodando ✅'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('ChegouJá API na porta ' + PORT));
+// Load the app state (from Supabase or the local file, see db.js) BEFORE
+// accepting any requests — otherwise the first requests could run against
+// an empty/half-initialized cache.
+initDB()
+  .then(() => {
+    app.listen(PORT, () => console.log('ChegouJá API na porta ' + PORT));
+  })
+  .catch((err) => {
+    console.error('Falha ao iniciar o banco de dados — servidor não subiu:', err.message);
+    process.exit(1);
+  });
