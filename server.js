@@ -2300,6 +2300,17 @@ app.get('/api/ratings/:type/:id/summary', (req, res) => {
 
 // Either the business that owns the order, or the motoboy currently
 // assigned to it, can cancel — anyone else gets rejected.
+//
+// Special case: if it's the MOTOBOY cancelling, and the order is still at
+// 'aceito' (hasn't reached the pickup location yet), this behaves like
+// /give-up instead of ending the order — it goes straight back into the
+// queue for the next motoboy, same as before, but now the reason/note the
+// motoboy picked is kept (as lastMotoboyCancelReason) so the business/admin
+// can still see why that motoboy backed out, without the order itself
+// dying. A business cancelling, or a motoboy cancelling after reaching the
+// pickup (physically closer to having the package), still ends the order
+// for real — requeuing doesn't make sense once the business needs to know
+// something went wrong, or the package may already be in hand.
 app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res) => {
   const db = loadDB();
   const o = db.orders[req.params.id];
@@ -2312,6 +2323,22 @@ app.post('/api/orders/:id/cancel', requireAuth('business', 'motoboy'), (req, res
   }
   const { reason, note } = req.body || {};
   if (!reason) return res.status(400).json({ error: 'Selecione um motivo para o cancelamento' });
+
+  if (isAssignedMotoboy && o.status === 'aceito') {
+    // Mesma regra do /give-up: devolve pra fila em vez de encerrar.
+    o.lastMotoboyCancelReason = reason;
+    o.lastMotoboyCancelNote = note || null;
+    o.declinedBy = Array.from(new Set([...(o.declinedBy || []), req.authId]));
+    o.status = 'pendente';
+    o.motoboyId = null;
+    o.motoboyName = null;
+    o.motoboyPhone = null;
+    o.acceptedAt = null;
+    advanceOffer(db, o); // hands it to the next motoboy in line, fresh window
+    saveDB(db);
+    return res.json(o);
+  }
+
   if (o.creditsCharged) {
     const business = db.businesses[o.businessId];
     if (business) {
