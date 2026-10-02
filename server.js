@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 const webpush = require('web-push');
+const admin = require('firebase-admin');
 const { loadDB, saveDB, initDB } = require('./db');
 
 const app = express();
@@ -56,6 +57,50 @@ if (pushEnabled) {
   console.warn('VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — notificações push desativadas.');
 }
 
+// ---------------------------------------------------------------
+// Firebase Cloud Messaging (FCM) — usado só para notificar o app Android
+// nativo (Capacitor) sobre corridas novas, de um jeito que acorda o
+// celular mesmo com o app fechado (ao contrário do Web Push acima, que só
+// funciona bem com o navegador/app em primeiro ou segundo plano). Sem a
+// variável FIREBASE_SERVICE_ACCOUNT configurada, esse recurso fica
+// desativado e o app segue funcionando normalmente do jeito antigo.
+// ---------------------------------------------------------------
+let fcmEnabled = false;
+try {
+  const saJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (saJson) {
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(saJson)) });
+    fcmEnabled = true;
+  } else {
+    console.warn('FIREBASE_SERVICE_ACCOUNT não configurada — notificação "toca como ligação" desativada.');
+  }
+} catch (e) {
+  console.error('Falha ao inicializar o Firebase Admin — confira o FIREBASE_SERVICE_ACCOUNT.', e.message);
+}
+
+// Manda uma notificação de alta prioridade via FCM para o token de um
+// motoboy específico. channel 'ride-offer' é o canal com som em loop e
+// tela cheia que o app Android (ver MainActivity.kt / plugin nativo) está
+// configurado para tratar de forma especial — ver Fase 4 da implementação.
+function sendFcmToMotoboy(fcmToken, { title, body, orderId, type }) {
+  if (!fcmEnabled || !fcmToken) return;
+  admin.messaging().send({
+    token: fcmToken,
+    android: {
+      priority: 'high',
+      notification: { channelId: type === 'new-offer' ? 'ride-offer' : 'default' }
+    },
+    data: {
+      type: type || 'generic',
+      orderId: orderId || '',
+      title: title || '',
+      body: body || ''
+    }
+  }).catch((err) => {
+    console.error('Falha ao enviar FCM para motoboy', err && err.message);
+  });
+}
+
 // Sends a push notification to every device subscribed for a given
 // business or motoboy record. Fire-and-forget on purpose — we never want
 // a slow/failed push to delay the API response the caller is waiting on.
@@ -92,6 +137,18 @@ function notifyEntity(collectionName, id, payload) {
 }
 function notifyMotoboy(motoboyId, payload) {
   notifyEntity('motoboys', motoboyId, payload);
+  if (fcmEnabled) {
+    const db = loadDB();
+    const motoboy = db.motoboys[motoboyId];
+    if (motoboy && motoboy.fcmToken) {
+      sendFcmToMotoboy(motoboy.fcmToken, {
+        title: payload.title,
+        body: payload.body,
+        orderId: payload.data && payload.data.orderId,
+        type: payload.data && payload.data.type
+      });
+    }
+  }
 }
 function notifyBusiness(businessId, payload) {
   notifyEntity('businesses', businessId, payload);
@@ -1100,6 +1157,22 @@ app.patch('/api/businesses/:id/location', requireAuth('business'), (req, res) =>
   b.preciseCoords = { lat, lng };
   saveDB(db);
   res.json(sanitizeBusiness(b));
+});
+
+// Salva/atualiza o token do Firebase Cloud Messaging do app Android nativo
+// do motoboy — usado só para a notificação "toca como ligação" de corrida
+// nova (ver sendFcmToMotoboy acima). Chamado pelo app assim que ele recebe
+// um token novo do Firebase (login, reinstalação, token expirado, etc.).
+app.post('/api/motoboys/:id/fcm-token', requireAuth('motoboy'), (req, res) => {
+  if (req.authId !== req.params.id) return res.status(403).json({ error: 'Não autorizado' });
+  const { token } = req.body || {};
+  if (!token) return res.status(400).json({ error: 'Token inválido' });
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
+  m.fcmToken = token;
+  saveDB(db);
+  res.json({ ok: true });
 });
 
 // Same idea as the motoboy push subscription — lets the business's browser
