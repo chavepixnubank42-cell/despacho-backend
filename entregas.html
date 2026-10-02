@@ -1783,6 +1783,7 @@
     showToast(labels[newStatus]);
     if(newStatus === 'online' && typeof pingMotoboyLocationIfOnline === 'function') pingMotoboyLocationIfOnline();
     if(newStatus === 'online') ensurePushSubscription('motoboy');
+    if(newStatus === 'online') ensureFcmRegistration();
     if(newStatus === 'online') acquireWakeLock(); else releaseWakeLock();
   }
 
@@ -2130,6 +2131,54 @@
       await apiPost(path+state.myId+'/push-subscription', {subscription: sub.toJSON()});
     }catch(e){
       console.error('Falha ao ativar notificações push', e);
+    }
+  }
+
+  // Equivalente ao ensurePushSubscription acima, mas para o app Android
+  // nativo (Capacitor) usando o Firebase Cloud Messaging — é o que permite
+  // a notificação de corrida nova "tocar como uma ligação", mesmo com o
+  // app fechado, coisa que o Web Push sozinho não consegue fazer.
+  let fcmRegistered = false;
+  async function ensureFcmRegistration(){
+    if(!isNativeApp() || fcmRegistered) return;
+    const plugin = window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
+    if(!plugin) return; // plugin não sincronizado ainda — sem problema, só fica sem esse recurso
+
+    try{
+      const permStatus = await plugin.checkPermissions();
+      if(permStatus.receive !== 'granted'){
+        const req = await plugin.requestPermissions();
+        if(req.receive !== 'granted') return;
+      }
+
+      // Canal de alta prioridade para corridas novas — a parte de tocar
+      // insistente/tela cheia é feita pelo código nativo Android que lê
+      // esse canal (ver MainActivity/serviço nativo), aqui só garantimos
+      // que ele existe com a importância certa.
+      try{
+        await plugin.createChannel({
+          id: 'ride-offer',
+          name: 'Corridas novas',
+          description: 'Avisa quando uma corrida nova é oferecida a você',
+          importance: 5,
+          visibility: 1,
+          vibration: true
+        });
+      }catch(e){ /* canal pode já existir — sem problema */ }
+
+      await plugin.register();
+
+      plugin.addListener('registration', async (tokenInfo) => {
+        try{ await apiPost('/api/motoboys/'+state.myId+'/fcm-token', {token: tokenInfo.value}); }
+        catch(e){ console.error('Falha ao salvar token FCM', e); }
+      });
+      plugin.addListener('registrationError', (err) => {
+        console.error('Falha ao registrar no FCM', err);
+      });
+
+      fcmRegistered = true;
+    }catch(e){
+      console.error('Falha ao configurar notificações nativas (FCM)', e);
     }
   }
 
