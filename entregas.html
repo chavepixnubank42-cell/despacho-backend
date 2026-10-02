@@ -2376,7 +2376,11 @@
     state.cancelModal = null;
     await refreshOrders();
     render();
-    showToast('Corrida cancelada');
+    // Se for o motoboy cancelando antes de chegar na retirada, o backend
+    // devolve a corrida pra fila em vez de encerrar (ver /cancel no
+    // server.js) — por isso a mensagem reflete o que realmente aconteceu,
+    // em vez de sempre dizer "cancelada".
+    showToast(result.status === 'pendente' ? 'Corrida devolvida — foi para o próximo motoboy da fila' : 'Corrida cancelada');
   }
 
   // ---------- suporte (durante uma corrida, OU a qualquer momento) ----------
