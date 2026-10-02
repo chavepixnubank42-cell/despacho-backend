@@ -71,6 +71,7 @@ try {
   if (saJson) {
     admin.initializeApp({ credential: admin.credential.cert(JSON.parse(saJson)) });
     fcmEnabled = true;
+    console.log('Firebase Admin inicializado com sucesso — notificação "toca como ligação" disponível.');
   } else {
     console.warn('FIREBASE_SERVICE_ACCOUNT não configurada — notificação "toca como ligação" desativada.');
   }
