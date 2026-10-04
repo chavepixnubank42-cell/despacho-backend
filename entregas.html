@@ -37,6 +37,17 @@
     --font-body:'Inter', sans-serif;
     --font-mono:'IBM Plex Mono', monospace;
   }
+  /* Tema claro — ativado colocando data-theme="light" na tag <html>
+     (ver toggleTheme/applyStoredTheme no JS). As cores de destaque (lime,
+     orange, amber) ficam as mesmas nos dois temas, só o fundo/texto muda. */
+  :root[data-theme="light"]{
+    --bg:#F7F8FA;
+    --surface:#FFFFFF;
+    --surface-2:#F0F1F3;
+    --border:#DDE1E6;
+    --text:#1A1D21;
+    --muted:#6B7280;
+  }
   *{box-sizing:border-box;}
   html{
     /* Stops the browser's native "pull down to reload" gesture from
@@ -53,6 +64,10 @@
     font-family:var(--font-body);
     -webkit-font-smoothing:antialiased;
     overscroll-behavior-y: contain;
+    /* Evita o conteúdo ficar escondido atrás da barra de status do
+       celular (bateria/wifi/hora) no app nativo — sem isso, o topo da
+       tela ficava "por baixo" dessas informações. */
+    padding-top: env(safe-area-inset-top, 0px);
   }
   #app{
     max-width:520px;
@@ -1082,6 +1097,41 @@
       .catch((e) => console.error('Falha ao registrar o service worker', e));
   }
 
+  // ---------- tema claro/escuro ----------
+  // Lido direto do localStorage (sem passar pelo getJSON assíncrono mais
+  // abaixo) para aplicar o tema certo antes da primeira pintura da tela,
+  // evitando o "piscar" no tema errado por uma fração de segundo.
+  const THEME_KEY = 'chegoja:theme-preference'; // mesmo prefixo usado por getJSON/setJSON abaixo
+  function getStoredTheme(){
+    try{ return localStorage.getItem(THEME_KEY); }catch(e){ return null; }
+  }
+  function applyTheme(theme){
+    document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
+  }
+  function toggleTheme(){
+    const current = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    const next = current === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    try{ localStorage.setItem(THEME_KEY, next); }catch(e){}
+    render();
+  }
+  applyTheme(getStoredTheme() || 'dark'); // 'dark' é o visual original do app
+
+  // ---------- barra de status nativa (Android) ----------
+  // Sem isso, o conteúdo do app ficava desenhado "por baixo" da barra de
+  // bateria/wifi/hora do celular — aqui a gente pede pro Android empurrar
+  // o conteúdo para baixo da barra de status, em vez de ficar por baixo
+  // dela (o padding-top: env(safe-area-inset-top) no CSS acima cobre o
+  // caso de navegador/PWA comum, isso aqui é específico do app nativo).
+  (function configureNativeStatusBar(){
+    try{
+      if(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()){
+        const StatusBar = window.Capacitor.Plugins && window.Capacitor.Plugins.StatusBar;
+        if(StatusBar && StatusBar.setOverlaysWebView) StatusBar.setOverlaysWebView({ overlay: false });
+      }
+    }catch(e){ /* não crítico — o padding do CSS já ajuda mesmo sem isso */ }
+  })();
+
   // ---------- storage helpers ----------
   // Wraps a promise so it always settles within `ms`, even if the network
   // request never responds — this is what previously made things hang
@@ -1244,11 +1294,20 @@
     }catch(e){ console.error('API PATCH falhou', path, e); return {error:'Não consegui falar com o servidor'}; }
   }
   async function apiSelfTest(){
-    if(!state.apiBase) return false;
+    if(!state.apiBase){ state.apiFailCount = (state.apiFailCount||0) + 1; return false; }
     try{
-      const res = await withTimeout(fetch(state.apiBase + '/'), 6000);
-      return !!(res && res.ok);
-    }catch(e){ return false; }
+      // 15s em vez de 6s: o backend roda num plano gratuito (Render) que
+      // "dorme" depois de 15 minutos sem uso e pode levar meio minuto pra
+      // acordar na próxima vez — 6s era pouco tempo e mostrava o aviso de
+      // erro mesmo quando era só o servidor ainda ligando.
+      const res = await withTimeout(fetch(state.apiBase + '/'), 15000);
+      const ok = !!(res && res.ok);
+      state.apiFailCount = ok ? 0 : (state.apiFailCount||0) + 1;
+      return ok;
+    }catch(e){
+      state.apiFailCount = (state.apiFailCount||0) + 1;
+      return false;
+    }
   }
 
   // ---------- sound & notification tracking ----------
@@ -2526,7 +2585,17 @@
     } else if(state.apiOk === false){
       const warn = document.createElement('div');
       warn.className = 'sync-warning';
-      warn.innerHTML = `⚠️ Não consegui conectar ao servidor (<code>${esc(state.apiBase)}</code>). Tentando de novo automaticamente… <span id="btn-change-server" style="text-decoration:underline;cursor:pointer;">Trocar endereço do servidor</span>.`;
+      // Nas primeiras tentativas, é bem provável que seja só o servidor
+      // "acordando" (plano gratuito) — mensagem tranquila, sem assustar
+      // nem sugerir trocar de endereço à toa. Só depois de várias
+      // tentativas seguidas (bem mais que o tempo normal de acordar) é
+      // que oferece a opção de trocar o servidor, caso seja mesmo um
+      // endereço errado.
+      if((state.apiFailCount||0) < 4){
+        warn.innerHTML = `⏳ Conectando ao servidor — se for a primeira vez em um tempo, ele pode levar até um minuto para iniciar. Tentando de novo automaticamente…`;
+      } else {
+        warn.innerHTML = `⚠️ Não consegui conectar ao servidor (<code>${esc(state.apiBase)}</code>). Tentando de novo automaticamente… <span id="btn-change-server" style="text-decoration:underline;cursor:pointer;">Trocar endereço do servidor</span>.`;
+      }
       wrap.appendChild(warn);
     }
 
@@ -2636,12 +2705,16 @@
         <button class="btn-ghost" id="btn-logout">Sair</button>
       `;
     }
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
     bar.innerHTML = `
       <div class="brand">
         <span class="brand-mark">CHEGOJÁ</span>
         <span class="brand-tag">entregas por moto</span>
       </div>
-      <div class="topbar-right">${right}</div>
+      <div class="topbar-right">
+        <button class="btn-ghost" id="btn-toggle-theme" title="${isLight ? 'Mudar para tema escuro' : 'Mudar para tema claro'}">${isLight ? '🌙' : '☀️'}</button>
+        ${right}
+      </div>
     `;
     return bar;
   }
@@ -3903,6 +3976,9 @@
 
     const logoutBtn = $('#btn-logout');
     if(logoutBtn) logoutBtn.onclick = logout;
+
+    const themeToggleBtn = $('#btn-toggle-theme');
+    if(themeToggleBtn) themeToggleBtn.onclick = toggleTheme;
 
     // Generic auth-form submit wiring: reads every named field, requires
     // all of them non-empty (matching what the fields actually offer),
