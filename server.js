@@ -88,8 +88,16 @@ function sendFcmToMotoboy(fcmToken, { title, body, orderId, type }) {
   admin.messaging().send({
     token: fcmToken,
     android: {
-      priority: 'high',
-      notification: { channelId: type === 'new-offer' ? 'ride-offer' : 'default' }
+      priority: 'high'
+      // IMPORTANTE: nenhum campo "notification" aqui, de propósito — só
+      // "data" abaixo. Assim que a mensagem tem um bloco "notification",
+      // o próprio Android mostra uma notificação padrão sozinho sempre
+      // que o app está em segundo plano/fechado, SEM chamar o código do
+      // app (RideOfferMessagingService.onMessageReceived nunca é
+      // disparado nesse caso) — foi isso que fazia tocar só o som comum
+      // em vez da tela cheia com o toque em loop. Com a mensagem sendo
+      // só "data", o Android sempre entrega para o nosso código, não
+      // importa se o app está aberto, em segundo plano ou fechado.
     },
     data: {
       type: type || 'generic',
