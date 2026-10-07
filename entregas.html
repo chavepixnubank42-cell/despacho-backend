@@ -1079,6 +1079,45 @@
     background:rgba(0,0,0,0.55); color:#fff; border:none;
     font-size:16px; cursor:pointer; line-height:1;
   }
+
+  /* ===== Novo painel do motoboy (mb-*) ===== */
+  :root{ --mb-green:#35e08a; }
+  .mb-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}
+  .mb-avatar{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:26px;background:var(--surface-2);border:2px solid var(--mb-green);flex-shrink:0;}
+  .mb-who{flex:1;min-width:130px;}
+  .mb-hello{font-size:13px;color:var(--muted);}
+  .mb-name{font-family:var(--font-display);font-size:19px;line-height:1.15;}
+  .mb-vehicle{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:3px;}
+  .mb-stats-row{margin-bottom:14px;}
+  .mb-rating{display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:12px;border:1px solid var(--border);background:var(--surface);}
+  .mb-rating-num{font-family:var(--font-display);font-size:18px;color:var(--amber);line-height:1.1;margin-top:2px;}
+  .mb-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px;}
+  .mb-card.mb-earn{border-color:var(--mb-green);background:rgba(53,224,138,.06);}
+  .mb-label{font-family:var(--font-mono);font-size:10px;letter-spacing:.8px;color:var(--muted);text-transform:uppercase;}
+  .mb-big{font-family:var(--font-display);font-size:24px;margin-top:6px;}
+  .mb-earn .mb-big{color:var(--mb-green);}
+  .mb-delta{display:block;font-family:var(--font-mono);font-size:11px;margin-top:4px;}
+  .mb-delta.is-up{color:var(--mb-green);}
+  .mb-delta.is-down{color:var(--orange);}
+  .mb-map-card{position:relative;margin-bottom:14px;}
+  .mb-map-card #motoboy-home-map{position:relative;z-index:0;height:220px;border-radius:16px;overflow:hidden;background:#1c1f1c;border:1px solid var(--border);}
+  .mb-map-pill{position:absolute;top:10px;left:10px;z-index:5;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:6px 12px;font-size:12px;}
+  .mb-avail-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:14px;margin-bottom:18px;}
+  .mb-avail-top{display:flex;align-items:center;gap:12px;}
+  .mb-avail-icon{width:48px;height:48px;border-radius:50%;background:rgba(53,224,138,.15);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;}
+  .mb-avail-text{flex:1;min-width:0;}
+  .mb-avail-title{font-family:var(--font-display);font-size:16px;}
+  .mb-avail-sub{font-size:12px;color:var(--muted);}
+  .mb-switch{width:52px;height:30px;border-radius:30px;border:none;background:var(--border);position:relative;cursor:pointer;flex-shrink:0;transition:background .15s;}
+  .mb-switch::after{content:'';position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:transform .15s;}
+  .mb-switch.is-on{background:var(--mb-green);}
+  .mb-switch.is-on::after{transform:translateX(22px);}
+  .mb-pause-btn{width:100%;margin-top:12px;background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--font-mono);font-size:11px;padding:9px;border-radius:10px;cursor:pointer;}
+  .mb-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(70px,1fr));gap:8px;margin-top:12px;}
+  .mb-action{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px 6px;color:var(--text);font-family:var(--font-body);font-size:12px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;}
+  .mb-action span:first-child{font-size:18px;}
+  /* mapa do painel do motoboy escurecido no tema escuro */
+  :root[data-theme="dark"] .mb-map-card .leaflet-tile-pane{filter:invert(100%) hue-rotate(180deg) brightness(92%) contrast(88%) saturate(65%);}
 </style>
 </head>
 <body>
@@ -3324,34 +3363,68 @@
     }
     lastKnownActiveOrderId = activeOrder ? activeOrder.id : null;
 
+    const mbToday = startOfToday();
+    const mbYesterday = mbToday - 24*60*60*1000;
+    const mbDeliveredToday = finalizadas.filter(o => o.deliveredAt >= mbToday);
+    const mbEarnToday = sumMoney(mbDeliveredToday, o => o.value);
+    const mbEarnYesterday = sumMoney(finalizadas.filter(o => o.deliveredAt >= mbYesterday && o.deliveredAt < mbToday), o => o.value);
+    let mbDelta = '';
+    if(mbEarnYesterday > 0){
+      const pct = Math.round((mbEarnToday - mbEarnYesterday) / mbEarnYesterday * 100);
+      mbDelta = `<span class="mb-delta ${pct>=0?'is-up':'is-down'}">${pct>=0?'↑':'↓'} ${Math.abs(pct)}% vs. ontem</span>`;
+    }
+    const mbRating = state.myRatingSummary;
+    const mbRatingText = (mbRating && mbRating.count > 0) ? mbRating.average.toFixed(1).replace('.', ',') + ' ★' : '—';
     d.innerHTML = `
-      <p class="eyebrow">Painel do motoboy</p>
-      <h1 class="page-title">${esc(state.profile.name)}</h1>
-      <p class="page-sub" style="font-family:var(--font-mono);font-size:12px;">🏍️ ${esc(state.profile.vehicle)}</p>
-      <div style="margin-bottom:16px;">${ratingBadgeHtml()}</div>
-      <div class="status-toggle-row">
-        <button class="status-btn is-online ${curStatus==='online'?'active':''}" data-set-status="online">🟢 On-line</button>
-        <button class="status-btn is-pausado ${curStatus==='pausado'?'active':''}" data-set-status="pausado">🟡 Pausado</button>
-        <button class="status-btn is-offline ${curStatus==='offline'?'active':''}" data-set-status="offline">⚪ Off-line</button>
+      <div class="mb-header">
+        <div class="mb-avatar">🏍️</div>
+        <div class="mb-who">
+          <div class="mb-hello">Olá,</div>
+          <div class="mb-name">${esc(state.profile.name)}</div>
+          <div class="mb-vehicle">🏍️ ${esc(state.profile.vehicle||'')}</div>
+        </div>
+        <div class="mb-rating">
+          <div>
+            <div class="mb-label">Avaliação</div>
+            <div class="mb-rating-num">${mbRatingText}</div>
+          </div>
+        </div>
       </div>
-      <div id="motoboy-home-map" style="height:200px;border-radius:14px;overflow:hidden;margin-bottom:16px;background:#1c1f1c;"></div>
+      ${activeOrder ? renderActiveRideBanner(activeOrder) : ''}
+      <div class="mb-stats-row">
+        <div class="mb-card mb-earn">
+          <div class="mb-label">Ganhos hoje</div>
+          <div class="mb-big">${formatMoney(mbEarnToday)}</div>
+          ${mbDelta}
+        </div>
+      </div>
+      <div class="mb-map-card">
+        <div id="motoboy-home-map"></div>
+        <div class="mb-map-pill">📍 Sua localização</div>
+      </div>
       ${!liveGeo && online ? '<div class="field-hint" style="margin-top:-10px;margin-bottom:16px;">📡 Obtendo sua localização…</div>' : ''}
       ${curStatus==='pausado' && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()
         ? `<div class="field-hint" style="margin-bottom:16px;color:#FF6A6A;">⏸️ Pausa automática: você perdeu a última corrida por não chegar a tempo na retirada. Você volta a poder ficar on-line <span id="forced-pause-countdown" data-until="${state.profile.forcedPauseUntil}">em instantes</span>.</div>`
         : curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
-      ${activeOrder ? '' : `<button class="btn-secondary" id="btn-open-sound-picker" style="margin-bottom:20px;">🔊 Som de aviso: ${esc(soundPrefLabel())}</button>`}
-      ${activeOrder ? renderActiveRideBanner(activeOrder) : ''}
-      <div class="stat-strip">
-        <div class="stat-box"><div class="stat-num">${disponiveis.length}</div><div class="stat-label">Disponíveis</div></div>
-        <div class="stat-box"><div class="stat-num">${ativa.length}</div><div class="stat-label">Em andamento</div></div>
-        <div class="stat-box"><div class="stat-num">${formatMoney(ganho)}</div><div class="stat-label">Ganho (total)</div></div>
-      </div>
-      <div class="quick-access-row">
-        <button class="quick-access-btn" id="btn-open-history"><span class="qa-icon">📜</span>Meu histórico</button>
-        <button class="quick-access-btn" id="btn-open-earnings"><span class="qa-icon">💰</span>Meus ganhos</button>
+      
+      <div class="mb-avail-card">
+        <div class="mb-avail-top">
+          <div class="mb-avail-icon">🏍️</div>
+          <div class="mb-avail-text">
+            <div class="mb-avail-title">Ficar disponível</div>
+            <div class="mb-avail-sub">${online ? 'Você está recebendo corridas' : curStatus==='pausado' ? '🟡 Pausado — não recebe corridas novas' : 'Receba corridas automaticamente'}</div>
+          </div>
+          <button class="mb-switch ${online?'is-on':''}" data-set-status="${online?'offline':'online'}" aria-label="Ficar disponível"></button>
+        </div>
+        ${online ? '<button class="mb-pause-btn" data-set-status="pausado">🟡 Pausar por um momento</button>' : (curStatus==='pausado' ? '<button class="mb-pause-btn" data-set-status="offline">⚪ Ficar off-line</button>' : '')}
+        <div class="mb-actions">
+          <button class="mb-action" id="btn-open-history"><span>💰</span><span>Ganhos e histórico</span></button>
+          ${activeOrder ? '' : '<button class="mb-action" id="btn-open-sound-picker"><span>🔊</span><span>Som</span></button>'}
+          <button class="mb-action" id="btn-open-general-support"><span>❓</span><span>Ajuda</span></button>
+        </div>
       </div>
       <div class="tab-row">
-        <button class="tab-btn ${state.motoboyTab==='disponiveis'?'active':''}" data-tab="disponiveis">Disponíveis</button>
+        <button class="tab-btn ${state.motoboyTab==='disponiveis'?'active':''}" data-tab="disponiveis">Disponíveis${disponiveis.length?' ('+disponiveis.length+')':''}</button>
         <button class="tab-btn ${state.motoboyTab==='ativa'?'active':''}" data-tab="ativa">Em andamento</button>
         <button class="tab-btn ${state.motoboyTab==='finalizadas'?'active':''}" data-tab="finalizadas">Finalizadas</button>
         <button class="tab-btn ${state.motoboyTab==='canceladas'?'active':''}" data-tab="canceladas">Canceladas</button>
