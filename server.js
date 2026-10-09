@@ -1075,11 +1075,14 @@ app.post('/api/businesses/complete-profile', async (req, res) => {
   res.json({ token, business: sanitizeBusiness(business) });
 });
 
-app.get('/api/businesses', (req, res) => {
+app.get('/api/businesses', requireAuth('admin'), (req, res) => {
   res.json(Object.values(loadDB().businesses).map(sanitizeBusiness));
 });
 
-app.get('/api/businesses/:id', (req, res) => {
+app.get('/api/businesses/:id', requireAuth('admin', 'business'), (req, res) => {
+  if (req.authType === 'business' && req.authId !== req.params.id) {
+    return res.status(403).json({ error: 'Não autorizado' });
+  }
   const b = loadDB().businesses[req.params.id];
   if (!b) return res.status(404).json({ error: 'Comércio não encontrado' });
   res.json(sanitizeBusiness(b));
@@ -1390,11 +1393,14 @@ app.post('/api/motoboys/complete-profile', async (req, res) => {
   res.json({ token, motoboy: sanitizeMotoboy(motoboy) });
 });
 
-app.get('/api/motoboys', (req, res) => {
+app.get('/api/motoboys', requireAuth('admin'), (req, res) => {
   res.json(Object.values(loadDB().motoboys).map(sanitizeMotoboy));
 });
 
-app.get('/api/motoboys/:id', (req, res) => {
+app.get('/api/motoboys/:id', requireAuth('admin', 'motoboy'), (req, res) => {
+  if (req.authType === 'motoboy' && req.authId !== req.params.id) {
+    return res.status(403).json({ error: 'Não autorizado' });
+  }
   const m = loadDB().motoboys[req.params.id];
   if (!m) return res.status(404).json({ error: 'Motoboy não encontrado' });
   res.json(sanitizeMotoboy(m));
