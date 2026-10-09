@@ -1127,6 +1127,8 @@
   .mb-avatar{overflow:hidden;}
   .mini-avatar{width:36px;height:36px;border-radius:50%;object-fit:cover;border:1px solid var(--border);flex-shrink:0;}
   .mb-photo-nudge{width:100%;text-align:left;background:rgba(255,201,61,.08);border:1px solid var(--amber);color:var(--text);border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.4;margin-bottom:14px;cursor:pointer;font-family:var(--font-body);}
+  .photo-buttons{display:flex;gap:8px;flex-wrap:wrap;}
+  .photo-buttons .btn-secondary{flex:1;width:auto;min-width:100px;padding:10px 8px;}
 </style>
 </head>
 <body>
@@ -2994,10 +2996,14 @@
           <div class="photo-pick">
             <div class="photo-preview" id="photo-preview">${pendingMotoboyPhoto ? '<img src="'+pendingMotoboyPhoto+'" alt="">' : '📷'}</div>
             <div style="flex:1;">
-              <button type="button" class="btn-secondary" id="btn-pick-photo">${pendingMotoboyPhoto ? 'Trocar foto' : 'Tirar foto ou escolher'}</button>
+              <div class="photo-buttons">
+                <button type="button" class="btn-secondary" id="btn-take-photo">📷 Tirar foto</button>
+                <button type="button" class="btn-secondary" id="btn-pick-photo">🖼️ Galeria</button>
+              </div>
               <div class="field-hint">Rosto visível, sem óculos escuros ou capacete. O comércio vê sua foto quando você aceita a corrida.</div>
             </div>
           </div>
+          <input type="file" id="photo-input-camera" accept="image/*" capture="user" style="display:none">
           <input type="file" id="photo-input" accept="image/*" style="display:none">
         </div>
         <button type="button" id="btn-submit-register-motoboy" class="btn-primary">Criar conta</button>
@@ -3070,7 +3076,11 @@
       ${!isBusiness ? `
         <div style="text-align:center;margin-bottom:18px;">
           <div class="photo-preview photo-preview-lg" id="profile-photo-preview">${ownPhotoHtml('📷')}</div>
-          <button type="button" class="btn-secondary" id="btn-change-photo" style="margin-top:10px;">📷 ${p.hasPhoto ? 'Trocar foto' : 'Adicionar foto'}</button>
+          <div class="photo-buttons" style="margin-top:10px;justify-content:center;">
+            <button type="button" class="btn-secondary" id="btn-change-photo-camera">📷 ${p.hasPhoto ? 'Tirar nova foto' : 'Tirar foto'}</button>
+            <button type="button" class="btn-secondary" id="btn-change-photo">🖼️ Galeria</button>
+          </div>
+          <input type="file" id="profile-photo-input-camera" accept="image/*" capture="user" style="display:none">
           <input type="file" id="profile-photo-input" accept="image/*" style="display:none">
         </div>` : ''}
       <div class="divider-text">seus dados</div>
@@ -4152,27 +4162,27 @@
     const printInvoiceBtn = $('#btn-print-invoice');
     if(printInvoiceBtn) printInvoiceBtn.onclick = ()=>window.print();
 
-    const btnPickPhoto = $('#btn-pick-photo');
-    const photoInput = $('#photo-input');
-    if(btnPickPhoto && photoInput){
-      btnPickPhoto.onclick = ()=>photoInput.click();
-      photoInput.onchange = async (e)=>{
-        const file = e.target.files && e.target.files[0];
-        if(!file) return;
-        try{
-          pendingMotoboyPhoto = await resizePhotoFile(file, 320);
-          const prev = $('#photo-preview');
-          if(prev) prev.innerHTML = '<img src="' + pendingMotoboyPhoto + '" alt="">';
-          btnPickPhoto.textContent = 'Trocar foto';
-        }catch(err){ showToast(err.message || 'Não consegui usar essa foto'); }
+    function wirePhoto(btnId, inputId, onFile){
+      const btn = $('#' + btnId), input = $('#' + inputId);
+      if(!btn || !input) return;
+      btn.onclick = ()=>input.click();
+      input.onchange = (e)=>{
+        const f = e.target.files && e.target.files[0];
+        e.target.value = ''; // permite escolher o mesmo arquivo de novo
+        if(f) onFile(f);
       };
     }
-    const btnChangePhoto = $('#btn-change-photo');
-    const profilePhotoInput = $('#profile-photo-input');
-    if(btnChangePhoto && profilePhotoInput){
-      btnChangePhoto.onclick = ()=>profilePhotoInput.click();
-      profilePhotoInput.onchange = (e)=>{ changeMyPhoto(e.target.files && e.target.files[0]); };
-    }
+    const onRegisterPhoto = async (file)=>{
+      try{
+        pendingMotoboyPhoto = await resizePhotoFile(file, 320);
+        const prev = $('#photo-preview');
+        if(prev) prev.innerHTML = '<img src="' + pendingMotoboyPhoto + '" alt="">';
+      }catch(err){ showToast(err.message || 'Não consegui usar essa foto'); }
+    };
+    wirePhoto('btn-take-photo', 'photo-input-camera', onRegisterPhoto);
+    wirePhoto('btn-pick-photo', 'photo-input', onRegisterPhoto);
+    wirePhoto('btn-change-photo-camera', 'profile-photo-input-camera', changeMyPhoto);
+    wirePhoto('btn-change-photo', 'profile-photo-input', changeMyPhoto);
 
     const logoutBtn = $('#btn-logout');
     if(logoutBtn) logoutBtn.onclick = logout;
