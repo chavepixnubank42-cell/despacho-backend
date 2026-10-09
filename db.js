@@ -42,6 +42,9 @@ function withDefaults(db) {
 let cache = null;
 let saveDBImpl;
 let initDBImpl;
+let savePhotoImpl;
+let getPhotoImpl;
+let deletePhotoImpl;
 
 if (process.env.DATABASE_URL) {
   // ---------- SUPABASE / POSTGRES MODE ----------
@@ -75,8 +78,31 @@ if (process.env.DATABASE_URL) {
 
   initDBImpl = async function initDB() {
     cache = await ensureTable();
+    // Fotos de perfil ficam numa tabela separada: o blob principal é
+    // regravado inteiro a cada alteração, e fotos dentro dele o deixariam pesado.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS motoboy_photos (
+        motoboy_id TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
     console.log('Banco de dados: conectado ao Supabase (Postgres).');
     return cache;
+  };
+
+  savePhotoImpl = async function savePhoto(id, dataUrl) {
+    await pool.query(
+      'INSERT INTO motoboy_photos (motoboy_id, data) VALUES ($1, $2) ON CONFLICT (motoboy_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()',
+      [String(id), dataUrl]
+    );
+  };
+  getPhotoImpl = async function getPhoto(id) {
+    const { rows } = await pool.query('SELECT data FROM motoboy_photos WHERE motoboy_id = $1', [String(id)]);
+    return rows.length ? rows[0].data : null;
+  };
+  deletePhotoImpl = async function deletePhoto(id) {
+    await pool.query('DELETE FROM motoboy_photos WHERE motoboy_id = $1', [String(id)]);
   };
 
   let writeQueue = Promise.resolve();
@@ -141,6 +167,19 @@ if (process.env.DATABASE_URL) {
     return cache;
   };
 
+  const PHOTO_DIR = path.join(DATA_DIR, 'photos');
+  const photoFile = (id) => path.join(PHOTO_DIR, String(id).replace(/[^a-zA-Z0-9_-]/g, '') + '.txt');
+  savePhotoImpl = async function savePhoto(id, dataUrl) {
+    fs.mkdirSync(PHOTO_DIR, { recursive: true });
+    fs.writeFileSync(photoFile(id), dataUrl);
+  };
+  getPhotoImpl = async function getPhoto(id) {
+    try { return fs.readFileSync(photoFile(id), 'utf8'); } catch (e) { return null; }
+  };
+  deletePhotoImpl = async function deletePhoto(id) {
+    try { fs.unlinkSync(photoFile(id)); } catch (e) { /* já não existia */ }
+  };
+
   let writeQueue = Promise.resolve();
   saveDBImpl = function saveDB(db) {
     cache = db;
@@ -187,4 +226,14 @@ async function initDB() {
   return initDBImpl();
 }
 
-module.exports = { loadDB, saveDB, initDB };
+function savePhoto(id, dataUrl) {
+  return savePhotoImpl(id, dataUrl);
+}
+function getPhoto(id) {
+  return getPhotoImpl(id);
+}
+function deletePhoto(id) {
+  return deletePhotoImpl(id);
+}
+
+module.exports = { loadDB, saveDB, initDB, savePhoto, getPhoto, deletePhoto };

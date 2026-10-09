@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 const webpush = require('web-push');
 const admin = require('firebase-admin');
-const { loadDB, saveDB, initDB } = require('./db');
+const { loadDB, saveDB, initDB, savePhoto, getPhoto, deletePhoto } = require('./db');
 
 const app = express();
 app.use(cors());
@@ -837,6 +837,7 @@ app.delete('/api/admin/motoboys/:id', requireAuth('admin'), (req, res) => {
     return res.status(409).json({ error: 'Esse motoboy tem uma entrega em andamento — espere ela terminar antes de excluir.' });
   }
   delete db.motoboys[m.id];
+  deletePhoto(m.id).catch(() => {});
   saveDB(db);
   res.json({ ok: true });
 });
@@ -1247,10 +1248,65 @@ app.post('/api/businesses/:id/change-password', requireAuth('business'), async (
 // ---------------------------------------------------------------
 // Motoboys
 // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// Foto de perfil do motoboy. Fica numa tabela separada (ver db.js) e só é
+// entregue por esta rota autenticada: o próprio motoboy, o admin e o
+// comércio que tem (ou teve) uma corrida com esse motoboy.
+// ---------------------------------------------------------------
+const MAX_PHOTO_BYTES = 400 * 1024; // o app já reduz a foto para ~30-60KB; isto é só um teto de segurança
+function parsePhotoDataUrl(dataUrl) {
+  if (typeof dataUrl !== 'string') return { error: 'Foto inválida' };
+  const m = dataUrl.match(/^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) return { error: 'Use uma foto nos formatos JPG, PNG ou WEBP' };
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length < 200) return { error: 'Foto inválida' };
+  if (buf.length > MAX_PHOTO_BYTES) return { error: 'Foto muito grande — tire outra' };
+  // Confere o conteúdo de verdade (não só o que o cabeçalho diz) e normaliza o tipo.
+  let mime = null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) mime = 'image/jpeg';
+  else if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) mime = 'image/png';
+  else if (buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP') mime = 'image/webp';
+  if (!mime) return { error: 'O arquivo enviado não é uma imagem válida' };
+  return { dataUrl: 'data:' + mime + ';base64,' + m[1] };
+}
+
+app.get('/api/motoboys/:id/photo', requireAuth('motoboy', 'business', 'admin'), async (req, res) => {
+  const db = loadDB();
+  const m = db.motoboys[req.params.id];
+  if (!m || !m.hasPhoto) return res.status(404).json({ error: 'Sem foto' });
+  let allowed = false;
+  if (req.authType === 'admin') allowed = true;
+  else if (req.authType === 'motoboy') allowed = req.authId === m.id;
+  else if (req.authType === 'business') {
+    allowed = Object.values(db.orders).some((o) => o.businessId === req.authId && o.motoboyId === m.id);
+  }
+  if (!allowed) return res.status(403).json({ error: 'Não autorizado' });
+  let stored = null;
+  try {
+    stored = await getPhoto(m.id);
+  } catch (e) {
+    console.error('Erro ao ler foto do motoboy:', e.message);
+    return res.status(500).json({ error: 'Não foi possível carregar a foto' });
+  }
+  const match = stored && stored.match(/^data:(image\/[a-z]+);base64,(.+)$/);
+  if (!match) return res.status(404).json({ error: 'Sem foto' });
+  res.set({
+    'Content-Type': match[1],
+    'Cache-Control': 'private, max-age=300',
+    'X-Content-Type-Options': 'nosniff'
+  });
+  res.send(Buffer.from(match[2], 'base64'));
+});
+
 app.post('/api/motoboys', async (req, res) => {
-  const { name, phone, email, password, confirmPassword, vehicle } = req.body || {};
+  const { name, phone, email, password, confirmPassword, vehicle, photo } = req.body || {};
   if (!name || !phone || !email || !password || !vehicle) {
     return res.status(400).json({ error: 'Preencha todos os campos' });
+  }
+  // Foto obrigatória para quem está se cadastrando agora.
+  const parsedPhoto = parsePhotoDataUrl(photo);
+  if (parsedPhoto.error) {
+    return res.status(400).json({ error: photo ? parsedPhoto.error : 'Adicione sua foto para continuar' });
   }
   if (password !== confirmPassword) {
     return res.status(400).json({ error: 'As senhas não coincidem' });
@@ -1275,6 +1331,14 @@ app.post('/api/motoboys', async (req, res) => {
     approved: false, // an admin has to approve before this motoboy can go online / receive rides
     createdAt: Date.now()
   };
+  try {
+    await savePhoto(motoboy.id, parsedPhoto.dataUrl);
+  } catch (e) {
+    console.error('Erro ao salvar foto do motoboy:', e.message);
+    return res.status(500).json({ error: 'Não foi possível salvar a foto. Tente de novo.' });
+  }
+  motoboy.hasPhoto = true;
+  motoboy.photoUpdatedAt = Date.now();
   db.motoboys[motoboy.id] = motoboy;
   const token = createSession(db, 'motoboy', motoboy.id);
   saveDB(db);
@@ -1387,6 +1451,20 @@ app.patch('/api/motoboys/:id', requireAuth('motoboy'), async (req, res) => {
     }
     m.status = req.body.online ? 'online' : 'offline';
     m.online = req.body.online;
+  }
+
+  // Troca da foto de perfil (o app manda a foto já reduzida).
+  if (typeof req.body.photo === 'string' && req.body.photo) {
+    const parsed = parsePhotoDataUrl(req.body.photo);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    try {
+      await savePhoto(m.id, parsed.dataUrl);
+    } catch (e) {
+      console.error('Erro ao salvar foto do motoboy:', e.message);
+      return res.status(500).json({ error: 'Não foi possível salvar a foto. Tente de novo.' });
+    }
+    m.hasPhoto = true;
+    m.photoUpdatedAt = Date.now();
   }
 
   // Live location ping — the app sends this every so often while the
