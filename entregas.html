@@ -1118,6 +1118,15 @@
   .mb-action span:first-child{font-size:18px;}
   /* mapa do painel do motoboy escurecido no tema escuro */
   :root[data-theme="dark"] .mb-map-card .leaflet-tile-pane{filter:invert(100%) hue-rotate(180deg) brightness(92%) contrast(88%) saturate(65%);}
+
+  /* ===== Foto do motoboy ===== */
+  .photo-pick{display:flex;align-items:center;gap:14px;}
+  .photo-preview{width:84px;height:84px;border-radius:50%;background:var(--surface-2);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:30px;overflow:hidden;flex-shrink:0;}
+  .photo-preview-lg{width:110px;height:110px;margin:0 auto;font-size:38px;}
+  .photo-preview img, .mb-avatar img{width:100%;height:100%;object-fit:cover;display:block;}
+  .mb-avatar{overflow:hidden;}
+  .mini-avatar{width:36px;height:36px;border-radius:50%;object-fit:cover;border:1px solid var(--border);flex-shrink:0;}
+  .mb-photo-nudge{width:100%;text-align:left;background:rgba(255,201,61,.08);border:1px solid var(--amber);color:var(--text);border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.4;margin-bottom:14px;cursor:pointer;font-family:var(--font-body);}
 </style>
 </head>
 <body>
@@ -1346,6 +1355,77 @@
     }catch(e){
       state.apiFailCount = (state.apiFailCount||0) + 1;
       return false;
+    }
+  }
+
+  // ---------- foto do motoboy ----------
+  let pendingMotoboyPhoto = null; // foto escolhida no cadastro (já reduzida)
+  let regDraft = null;            // texto digitado no cadastro, para não sumir quando a tela é redesenhada
+  const photoCache = {};          // motoboyId -> {url, ts, loading}
+  const PHOTO_TTL_MS = 10 * 60 * 1000;
+
+  // Reduz a foto no próprio aparelho: recorta um quadrado central de 320x320 e salva
+  // em JPEG (cerca de 30-60KB), para o cadastro não ficar pesado nem travar.
+  function resizePhotoFile(file, size){
+    return new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onerror = ()=>reject(new Error('Não consegui ler a foto'));
+      reader.onload = ()=>{
+        const img = new Image();
+        img.onerror = ()=>reject(new Error('Esse formato de imagem não é suportado'));
+        img.onload = ()=>{
+          const side = Math.min(img.width, img.height);
+          const sx = (img.width - side) / 2, sy = (img.height - side) / 2;
+          const canvas = document.createElement('canvas');
+          canvas.width = size; canvas.height = size;
+          canvas.getContext('2d').drawImage(img, sx, sy, side, side, 0, 0, size, size);
+          resolve(canvas.toDataURL('image/jpeg', 0.8));
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Devolve na hora a foto que já está guardada; se ainda não tem, busca em segundo
+  // plano (com o login, porque a rota é protegida) e redesenha a tela quando chegar.
+  function photoSrc(id){
+    if(!id) return null;
+    const c = photoCache[id];
+    if(!c || (!c.loading && Date.now() - c.ts > PHOTO_TTL_MS)) loadPhoto(id);
+    return c && c.url ? c.url : null;
+  }
+  async function loadPhoto(id){
+    const prev = photoCache[id];
+    photoCache[id] = { url: prev ? prev.url : null, ts: Date.now(), loading: true };
+    try{
+      const res = await withTimeout(fetch(state.apiBase + '/api/motoboys/' + id + '/photo', {headers: authHeaders()}), 10000);
+      if(res && res.ok){
+        const blob = await res.blob();
+        photoCache[id] = { url: URL.createObjectURL(blob), ts: Date.now(), loading: false };
+        if(canSafelyRerender()) render();
+      } else {
+        photoCache[id] = { url: (res && res.status === 404) ? null : (prev ? prev.url : null), ts: Date.now(), loading: false };
+      }
+    }catch(e){
+      photoCache[id] = { url: prev ? prev.url : null, ts: Date.now(), loading: false };
+    }
+  }
+  function ownPhotoHtml(fallback){
+    const src = (state.profile && state.profile.hasPhoto) ? photoSrc(state.myId) : null;
+    return src ? '<img src="' + src + '" alt="">' : fallback;
+  }
+  async function changeMyPhoto(file){
+    if(!file) return;
+    try{
+      const dataUrl = await resizePhotoFile(file, 320);
+      const result = await apiPatch('/api/motoboys/' + state.myId, {photo: dataUrl});
+      if(result.error){ showToast(result.error); return; }
+      state.profile = result;
+      photoCache[state.myId] = { url: dataUrl, ts: Date.now(), loading: false };
+      showToast('Foto atualizada ✅');
+    }catch(e){
+      showToast(e.message || 'Não consegui usar essa foto');
     }
   }
 
@@ -1754,8 +1834,11 @@
   }
 
   async function submitMotoboyRegister(data){
-    const result = await apiPost('/api/motoboys', data);
+    if(!pendingMotoboyPhoto){ showToast('Adicione sua foto para continuar'); return; }
+    const result = await apiPost('/api/motoboys', Object.assign({}, data, {photo: pendingMotoboyPhoto}));
     if(result.error){ showToast(result.error); return; }
+    pendingMotoboyPhoto = null;
+    regDraft = null;
     await afterAuthSuccess('motoboy', result.token, result.motoboy);
   }
   async function submitMotoboyLogin(data){
@@ -2602,6 +2685,8 @@
 
   // ---------- render ----------
   function render(){
+    const oldRegForm = root.querySelector('#form-register-motoboy');
+    if(oldRegForm){ regDraft = {}; oldRegForm.querySelectorAll('[name]').forEach(i=>{ regDraft[i.name] = i.value; }); }
     root.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.style.display='flex';
@@ -2904,10 +2989,22 @@
         ${authField('Senha','password','password','mínimo 6 caracteres')}
         ${authField('Confirmar senha','confirmPassword','password','repita a senha')}
         ${authField('Moto / placa','vehicle','text','Ex: Honda CG 160 · ABC1D23')}
+        <div class="field">
+          <label>Sua foto</label>
+          <div class="photo-pick">
+            <div class="photo-preview" id="photo-preview">${pendingMotoboyPhoto ? '<img src="'+pendingMotoboyPhoto+'" alt="">' : '📷'}</div>
+            <div style="flex:1;">
+              <button type="button" class="btn-secondary" id="btn-pick-photo">${pendingMotoboyPhoto ? 'Trocar foto' : 'Tirar foto ou escolher'}</button>
+              <div class="field-hint">Rosto visível, sem óculos escuros ou capacete. O comércio vê sua foto quando você aceita a corrida.</div>
+            </div>
+          </div>
+          <input type="file" id="photo-input" accept="image/*" style="display:none">
+        </div>
         <button type="button" id="btn-submit-register-motoboy" class="btn-primary">Criar conta</button>
       </form>
       <div style="margin-top:22px;"><button class="btn-secondary" data-goto="login-motoboy">← Já tenho conta</button></div>
     `;
+    if(regDraft){ d.querySelectorAll('[name]').forEach(i=>{ if(regDraft[i.name] !== undefined) i.value = regDraft[i.name]; }); }
     return d;
   }
 
@@ -2970,6 +3067,12 @@
       <p class="eyebrow">Perfil</p>
       <h1 class="page-title">${esc(p.name)}</h1>
       ${ratingBadgeHtml()}
+      ${!isBusiness ? `
+        <div style="text-align:center;margin-bottom:18px;">
+          <div class="photo-preview photo-preview-lg" id="profile-photo-preview">${ownPhotoHtml('📷')}</div>
+          <button type="button" class="btn-secondary" id="btn-change-photo" style="margin-top:10px;">📷 ${p.hasPhoto ? 'Trocar foto' : 'Adicionar foto'}</button>
+          <input type="file" id="profile-photo-input" accept="image/*" style="display:none">
+        </div>` : ''}
       <div class="divider-text">seus dados</div>
       <form id="form-profile" novalidate>
         <div class="field">
@@ -3377,7 +3480,7 @@
     const mbRatingText = (mbRating && mbRating.count > 0) ? mbRating.average.toFixed(1).replace('.', ',') + ' ★' : '—';
     d.innerHTML = `
       <div class="mb-header">
-        <div class="mb-avatar">🏍️</div>
+        <div class="mb-avatar">${ownPhotoHtml('🏍️')}</div>
         <div class="mb-who">
           <div class="mb-hello">Olá,</div>
           <div class="mb-name">${esc(state.profile.name)}</div>
@@ -3390,6 +3493,7 @@
           </div>
         </div>
       </div>
+      ${state.profile.hasPhoto ? '' : '<button class="mb-photo-nudge" data-goto="profile">📷 Adicione sua foto — o comércio vê quem está chegando para a retirada</button>'}
       ${activeOrder ? renderActiveRideBanner(activeOrder) : ''}
       <div class="mb-stats-row">
         <div class="mb-card mb-earn">
@@ -3637,7 +3741,8 @@
     let footExtra = '';
     if(mode==='business'){
       if(ACTIVE_STATUSES.includes(o.status) || o.status==='entregue'){
-        footExtra = `<a class="call-link" href="tel:${esc(o.motoboyPhone)}">📞 ${esc(o.motoboyName)}</a>`;
+        const mbPhoto = (o.motoboyId && ACTIVE_STATUSES.includes(o.status)) ? photoSrc(o.motoboyId) : null;
+        footExtra = (mbPhoto ? `<img class="mini-avatar" src="${mbPhoto}" alt="">` : '') + `<a class="call-link" href="tel:${esc(o.motoboyPhone)}">📞 ${esc(o.motoboyName)}</a>`;
       }
     }
 
@@ -4046,6 +4151,28 @@
     });
     const printInvoiceBtn = $('#btn-print-invoice');
     if(printInvoiceBtn) printInvoiceBtn.onclick = ()=>window.print();
+
+    const btnPickPhoto = $('#btn-pick-photo');
+    const photoInput = $('#photo-input');
+    if(btnPickPhoto && photoInput){
+      btnPickPhoto.onclick = ()=>photoInput.click();
+      photoInput.onchange = async (e)=>{
+        const file = e.target.files && e.target.files[0];
+        if(!file) return;
+        try{
+          pendingMotoboyPhoto = await resizePhotoFile(file, 320);
+          const prev = $('#photo-preview');
+          if(prev) prev.innerHTML = '<img src="' + pendingMotoboyPhoto + '" alt="">';
+          btnPickPhoto.textContent = 'Trocar foto';
+        }catch(err){ showToast(err.message || 'Não consegui usar essa foto'); }
+      };
+    }
+    const btnChangePhoto = $('#btn-change-photo');
+    const profilePhotoInput = $('#profile-photo-input');
+    if(btnChangePhoto && profilePhotoInput){
+      btnChangePhoto.onclick = ()=>profilePhotoInput.click();
+      profilePhotoInput.onchange = (e)=>{ changeMyPhoto(e.target.files && e.target.files[0]); };
+    }
 
     const logoutBtn = $('#btn-logout');
     if(logoutBtn) logoutBtn.onclick = logout;
