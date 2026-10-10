@@ -1129,6 +1129,7 @@
   .mb-photo-nudge{width:100%;text-align:left;background:rgba(255,201,61,.08);border:1px solid var(--amber);color:var(--text);border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.4;margin-bottom:14px;cursor:pointer;font-family:var(--font-body);}
   .photo-buttons{display:flex;gap:8px;flex-wrap:wrap;}
   .photo-buttons .btn-secondary{flex:1;width:auto;min-width:100px;padding:10px 8px;}
+  .contact-log{margin-top:10px;padding:8px 10px;background:var(--surface-2);border-radius:8px;font-size:12px;line-height:1.7;color:var(--muted);}
 </style>
 </head>
 <body>
@@ -2615,6 +2616,94 @@
     showToast(result.status === 'pendente' ? 'Corrida devolvida — foi para o próximo motoboy da fila' : 'Corrida cancelada');
   }
 
+  // ---------- contato rápido (comércio <-> motoboy) ----------
+  const CONTACT_ALERTS_UI = {
+    motoboy: [
+      ['cliente_nao_atende', '📵 Cliente não atende'],
+      ['aguardando_no_local', '📍 Estou aguardando no local'],
+      ['endereco_nao_encontrado', '🗺️ Não encontro o endereço'],
+      ['pedido_nao_pronto', '⏳ O pedido ainda não está pronto'],
+      ['vou_atrasar', '🕒 Vou me atrasar']
+    ],
+    business: [
+      ['pedido_pronto', '✅ O pedido já está pronto'],
+      ['cliente_pediu_aguardar', '✋ O cliente pediu para aguardar'],
+      ['ligue_para_mim', '📞 Ligue para o comércio, por favor'],
+      ['confira_endereco', '🗺️ Confira o endereço da entrega']
+    ]
+  };
+  function waLink(phone){
+    let d = (phone || '').replace(/\D/g, '');
+    if(!d) return null;
+    if(!(d.startsWith('55') && d.length >= 12)) d = '55' + d;
+    return 'https://wa.me/' + d;
+  }
+  // Últimos avisos trocados nessa corrida (só os da corrida atual do motoboy).
+  function renderContactLog(o){
+    const log = (o.contactLog || []).filter(e => e.at >= (o.acceptedAt || 0)).slice(-3);
+    if(!log.length) return '';
+    return '<div class="contact-log">' + log.map(e =>
+      '<div>' + (e.from === 'motoboy' ? '🏍️ Motoboy' : '🏬 Comércio') + ': ' + esc(e.text) + ' · ' +
+      new Date(e.at).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'}) + '</div>'
+    ).join('') + '</div>';
+  }
+  function openContactModal(orderId){ state.contactModal = {orderId}; render(); }
+  function closeContactModal(){ state.contactModal = null; render(); }
+  async function sendContactAlert(type){
+    const cm = state.contactModal;
+    if(!cm) return;
+    const result = await apiPost('/api/orders/' + cm.orderId + '/contact-alert', {type});
+    if(result.error){ showToast(result.error); render(); return; }
+    state.contactModal = null;
+    await refreshOrders();
+    render();
+    showToast('✅ Aviso enviado');
+  }
+  function renderContactModal(){
+    const cm = state.contactModal;
+    const o = (state.orders || []).find(x => x.id === cm.orderId);
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.id = 'contact-backdrop';
+    if(!o){
+      backdrop.innerHTML = `
+        <div class="modal-sheet">
+          <div class="modal-head"><span class="modal-title">Contato</span><button class="modal-close" id="contact-close">✕</button></div>
+          <p class="page-sub">Não encontrei essa corrida. Ela pode já ter sido encerrada.</p>
+        </div>`;
+      return backdrop;
+    }
+    const isBiz = state.role === 'business';
+    const otherName = isBiz ? (o.motoboyName || 'o motoboy') : (o.businessName || 'o comércio');
+    const otherPhone = isBiz ? o.motoboyPhone : o.businessPhone;
+    const tel = (otherPhone || '').replace(/[^\d+]/g, '');
+    const wa = waLink(otherPhone);
+    const alerts = CONTACT_ALERTS_UI[isBiz ? 'business' : 'motoboy'];
+    backdrop.innerHTML = `
+      <div class="modal-sheet">
+        <div class="modal-head">
+          <span class="modal-title">Contato · corrida #${o.id.slice(-6).toUpperCase()}</span>
+          <button class="modal-close" id="contact-close">✕</button>
+        </div>
+        <p class="page-sub" style="margin-bottom:10px;">Falar com <strong style="color:var(--text);">${esc(otherName)}</strong></p>
+        ${tel ? `<div class="photo-buttons" style="margin-bottom:16px;">
+          <a class="btn-secondary" style="text-align:center;text-decoration:none;display:block;" href="tel:${tel}">📞 Ligar</a>
+          ${wa ? `<a class="btn-secondary" style="text-align:center;text-decoration:none;display:block;" href="${wa}" target="_blank" rel="noopener">💬 WhatsApp</a>` : ''}
+        </div>` : '<p class="page-sub">Telefone não disponível.</p>'}
+        <div class="divider-text">aviso rápido</div>
+        <p class="page-sub" style="margin-bottom:12px;">Um toque e a outra parte recebe uma notificação na hora.</p>
+        <div class="reason-list">
+          ${alerts.map(a => `<button class="reason-btn" data-contact-alert="${a[0]}">${a[1]}</button>`).join('')}
+        </div>
+        <div class="divider-text">emergência</div>
+        ${isBiz
+          ? `<a class="btn-cancel-confirm" style="display:block;text-align:center;text-decoration:none;" href="https://wa.me/${SUPPORT_WHATSAPP_NUMBER}" target="_blank" rel="noopener">🚨 Chamar o suporte no WhatsApp</a>`
+          : `<button type="button" class="btn-cancel-confirm" id="btn-contact-emergency" style="width:100%;">🚨 Acidente ou emergência — falar com o suporte</button>`}
+      </div>
+    `;
+    return backdrop;
+  }
+
   // ---------- suporte (durante uma corrida, OU a qualquer momento) ----------
   const SUPPORT_REASONS = [
     {id:'endereco_errado', label:'Endereço/localização errada'},
@@ -2795,6 +2884,9 @@
     }
     if(state.supportModal){
       root.appendChild(renderSupportModal());
+    }
+    if(state.contactModal){
+      root.appendChild(renderContactModal());
     }
     if(state.showSoundPicker){
       root.appendChild(renderSoundPickerModal());
@@ -3631,9 +3723,10 @@
     // customer unreachable, accident...) — different from give-up/cancel,
     // which only make sense before the package is picked up. This just
     // flags it for the support team; it doesn't resolve anything by itself.
-    const supportLink = o.support && o.support.status === 'aberto'
+    const contactBtn = `<button type="button" class="btn-secondary" style="margin-top:12px;" data-open-contact="${o.id}">📞 Contato com o comércio / emergência</button>` + renderContactLog(o);
+    const supportLink = contactBtn + (o.support && o.support.status === 'aberto'
       ? `<div class="support-flag">⚠️ Suporte avisado — aguardando retorno</div>`
-      : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>`;
+      : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>`);
     if(o.status === 'aceito'){
       return `
         <div class="active-ride" id="active-ride-banner">
@@ -3791,6 +3884,11 @@
         : `<div class="ticket-actions"><button class="btn-accept" data-open-rate="${o.id}">⭐ Avaliar comércio</button></div>`;
     }
 
+    if(mode==='business' && ACTIVE_STATUSES.includes(o.status)){
+      actions += `<div class="ticket-actions" style="padding-top:0;"><button type="button" class="btn-secondary" data-open-contact="${o.id}">📞 Contato com o motoboy / emergência</button></div>`;
+      const cl = renderContactLog(o);
+      if(cl) actions += '<div style="padding:0 16px 14px;">' + cl + '</div>';
+    }
     el.innerHTML = `
       <div class="ticket-top">
         <span class="ticket-id">#${o.id.slice(-6).toUpperCase()} · ${timeAgo(o.createdAt)}</span>
@@ -4161,6 +4259,24 @@
     });
     const printInvoiceBtn = $('#btn-print-invoice');
     if(printInvoiceBtn) printInvoiceBtn.onclick = ()=>window.print();
+
+    root.querySelectorAll('[data-open-contact]').forEach(elm=>{
+      elm.onclick = ()=>openContactModal(elm.getAttribute('data-open-contact'));
+    });
+    const contactClose = $('#contact-close');
+    if(contactClose) contactClose.onclick = closeContactModal;
+    const contactBackdrop = $('#contact-backdrop');
+    if(contactBackdrop) contactBackdrop.onclick = (e)=>{ if(e.target===contactBackdrop) closeContactModal(); };
+    root.querySelectorAll('[data-contact-alert]').forEach(elm=>{
+      elm.onclick = ()=>{ elm.disabled = true; sendContactAlert(elm.getAttribute('data-contact-alert')); };
+    });
+    const contactEmergency = $('#btn-contact-emergency');
+    if(contactEmergency) contactEmergency.onclick = ()=>{
+      const id = state.contactModal.orderId;
+      state.contactModal = null;
+      state.supportModal = {orderId: id, reason: 'acidente_emergencia', note: ''};
+      render();
+    };
 
     function wirePhoto(btnId, inputId, onFile){
       const btn = $('#' + btnId), input = $('#' + inputId);
@@ -4635,7 +4751,7 @@
   // trocando de app e voltando) — this shared check keeps any of those
   // events from rebuilding the screen (and wiping whatever's being typed)
   // while a form, modal, or the profile screen is open.
-  const canSafelyRerender = () => !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile');
+  const canSafelyRerender = () => !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.contactModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile');
 
   // Mobile browsers throttle background tabs — catch up the moment the
   // app becomes visible/foreground again instead of waiting for the next tick.

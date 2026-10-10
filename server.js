@@ -400,7 +400,7 @@ function applyFreeCredits(b, { active, until }) {
 // whoever did opt in; this is the fallback that reaches everyone else.
 // ---------------------------------------------------------------
 const NOTICE_CAP = 30; // keep each inbox small — this is a feed, not an archive
-function pushNotice(db, collectionName, id, { title, body, promo }) {
+function pushNotice(db, collectionName, id, { title, body, promo, skipPush }) {
   const entity = db[collectionName][id];
   if (!entity) return;
   if (!Array.isArray(entity.notices)) entity.notices = [];
@@ -413,7 +413,7 @@ function pushNotice(db, collectionName, id, { title, body, promo }) {
     createdAt: Date.now()
   });
   if (entity.notices.length > NOTICE_CAP) entity.notices.length = NOTICE_CAP;
-  notifyEntity(collectionName, id, { title, body, data: { type: 'admin-message' } });
+  if (!skipPush) notifyEntity(collectionName, id, { title, body, data: { type: 'admin-message' } });
 }
 
 // ---------------------------------------------------------------
@@ -2176,6 +2176,70 @@ app.post('/api/orders/:id/support', requireAuth('motoboy'), (req, res) => {
       body: 'O motoboy reportou um problema: ' + (SUPPORT_REASON_LABELS[reason] || reason) + (note ? ' — ' + note.trim() : '') + '. Nosso suporte já foi avisado.',
       promo: false
     });
+  }
+  saveDB(db);
+  res.json(o);
+});
+
+// ---------------------------------------------------------------
+// Contato rápido entre comércio e motoboy durante a corrida (ex.: "cliente
+// não atende"). Um toque manda um aviso pronto para a outra parte — aviso
+// dentro do app + notificação — e fica registrado na corrida (contactLog).
+// Ligar e WhatsApp são feitos direto no aparelho, sem passar pelo servidor.
+// ---------------------------------------------------------------
+const CONTACT_ALERTS = {
+  motoboy: {
+    cliente_nao_atende: 'Cliente não atende',
+    aguardando_no_local: 'Estou aguardando no local',
+    endereco_nao_encontrado: 'Não encontro o endereço',
+    pedido_nao_pronto: 'O pedido ainda não está pronto',
+    vou_atrasar: 'Vou me atrasar'
+  },
+  business: {
+    pedido_pronto: 'O pedido já está pronto',
+    cliente_pediu_aguardar: 'O cliente pediu para aguardar',
+    ligue_para_mim: 'Ligue para o comércio, por favor',
+    confira_endereco: 'Confira o endereço da entrega'
+  }
+};
+const CONTACT_REPEAT_MS = 60 * 1000; // o mesmo aviso só pode ser repetido depois de 1 minuto
+const CONTACT_LOG_CAP = 30;          // limite de avisos por corrida (evita abuso)
+
+app.post('/api/orders/:id/contact-alert', requireAuth('motoboy', 'business'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Corrida não encontrada' });
+  const fromType = req.authType;
+  const isMine = fromType === 'motoboy' ? o.motoboyId === req.authId : o.businessId === req.authId;
+  if (!isMine) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (!ACTIVE_STATUSES.includes(o.status)) {
+    return res.status(409).json({ error: 'O contato rápido só funciona numa corrida em andamento.' });
+  }
+  const type = (req.body || {}).type;
+  const label = CONTACT_ALERTS[fromType][type];
+  if (!label) return res.status(400).json({ error: 'Aviso inválido' });
+
+  if (!Array.isArray(o.contactLog)) o.contactLog = [];
+  const now = Date.now();
+  const recent = o.contactLog.filter((e) => e.from === fromType && e.type === type && now - e.at < CONTACT_REPEAT_MS);
+  if (recent.length > 0) {
+    return res.status(429).json({ error: 'Você acabou de mandar esse aviso. Espere um minuto para repetir.' });
+  }
+  if (o.contactLog.length >= CONTACT_LOG_CAP) {
+    return res.status(429).json({ error: 'Limite de avisos dessa corrida atingido. Use o telefone ou chame o suporte.' });
+  }
+  o.contactLog.push({ from: fromType, type, text: label, at: now });
+
+  const code = '#' + o.id.slice(-6).toUpperCase();
+  const fromName = fromType === 'motoboy' ? (o.motoboyName || 'O motoboy') : (o.businessName || 'O comércio');
+  const title = (fromType === 'motoboy' ? '🏍️ ' : '🏬 ') + 'Aviso da corrida ' + code;
+  const body = fromName + ': ' + label;
+  if (fromType === 'motoboy') {
+    pushNotice(db, 'businesses', o.businessId, { title, body, promo: false });
+  } else {
+    // aviso dentro do app + notificação (web e Firebase) — sem duplicar o push
+    pushNotice(db, 'motoboys', o.motoboyId, { title, body, promo: false, skipPush: true });
+    notifyMotoboy(o.motoboyId, { title, body, data: { type: 'contact-alert', orderId: o.id } });
   }
   saveDB(db);
   res.json(o);
