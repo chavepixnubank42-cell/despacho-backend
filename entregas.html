@@ -1130,6 +1130,13 @@
   .photo-buttons{display:flex;gap:8px;flex-wrap:wrap;}
   .photo-buttons .btn-secondary{flex:1;width:auto;min-width:100px;padding:10px 8px;}
   .contact-log{margin-top:10px;padding:8px 10px;background:var(--surface-2);border-radius:8px;font-size:12px;line-height:1.7;color:var(--muted);}
+  /* ===== Barra de navegação do motoboy ===== */
+  .bottom-nav{position:fixed;left:0;right:0;bottom:0;z-index:40;background:var(--surface);border-top:1px solid var(--border);padding:6px 10px calc(6px + env(safe-area-inset-bottom, 0px));}
+  .bottom-nav-inner{display:flex;max-width:520px;margin:0 auto;}
+  .bn-item{flex:1;background:none;border:none;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-family:var(--font-mono);font-size:10px;letter-spacing:.3px;padding:6px 4px;border-radius:10px;cursor:pointer;}
+  .bn-item.active{color:var(--mb-green);background:rgba(53,224,138,.08);}
+  .bn-ico{font-size:20px;line-height:1.1;}
+  .has-bottom-nav main{padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));}
 </style>
 </head>
 <body>
@@ -2843,6 +2850,10 @@
     }
 
     root.appendChild(wrap);
+    if(state.role === 'motoboy' && BOTTOM_NAV_SCREENS.includes(state.screen)){
+      wrap.classList.add('has-bottom-nav');
+      root.appendChild(renderBottomNav());
+    }
 
     // Precisa vir DEPOIS do root.appendChild(wrap) acima — antes disso o
     // placeholder do mapa ainda não está de fato no documento, então
@@ -2906,6 +2917,24 @@
     }
 
     attachHandlers();
+  }
+
+  // Barra fixa de baixo do motoboy: Início, Ganhos, Perfil e Ajuda.
+  const BOTTOM_NAV_SCREENS = ['motoboy-dash', 'history-motoboy', 'profile', 'notices'];
+  function renderBottomNav(){
+    const nav = document.createElement('div');
+    nav.className = 'bottom-nav';
+    nav.id = 'bottom-nav';
+    const sc = state.screen;
+    nav.innerHTML = `
+      <div class="bottom-nav-inner">
+        <button class="bn-item ${sc==='motoboy-dash'?'active':''}" data-bn="home"><span class="bn-ico">🏠</span><span>Início</span></button>
+        <button class="bn-item ${sc==='history-motoboy'?'active':''}" data-bn="earnings"><span class="bn-ico">💰</span><span>Ganhos</span></button>
+        <button class="bn-item ${sc==='profile'?'active':''}" data-bn="profile"><span class="bn-ico">👤</span><span>Perfil</span></button>
+        <button class="bn-item" data-bn="help"><span class="bn-ico">❓</span><span>Ajuda</span></button>
+      </div>
+    `;
+    return nav;
   }
 
   function renderTopbar(){
@@ -3218,6 +3247,11 @@
         </div>
         <button type="button" class="btn-secondary" id="btn-change-password">Trocar senha</button>
       </form>
+      ${!isBusiness ? `
+        <div class="divider-text">som de aviso</div>
+        <button type="button" class="btn-secondary" id="btn-open-sound-picker" style="width:100%;">🔊 ${esc(soundPrefLabel())}</button>
+        <p class="row-sub" style="margin-top:8px;">Toca quando chega uma corrida com o app aberto.</p>
+      ` : ''}
       ${!isBusiness ? `
         <div class="divider-text">precisa de ajuda?</div>
         <button type="button" class="btn-secondary" id="btn-open-general-support" style="width:100%;">⚠️ Falar com o suporte</button>
@@ -3623,11 +3657,6 @@
           <button class="mb-switch ${online?'is-on':''}" data-set-status="${online?'offline':'online'}" aria-label="Ficar disponível"></button>
         </div>
         ${online ? '<button class="mb-pause-btn" data-set-status="pausado">🟡 Pausar por um momento</button>' : (curStatus==='pausado' ? '<button class="mb-pause-btn" data-set-status="offline">⚪ Ficar off-line</button>' : '')}
-        <div class="mb-actions">
-          <button class="mb-action" id="btn-open-history"><span>💰</span><span>Ganhos e histórico</span></button>
-          ${activeOrder ? '' : '<button class="mb-action" id="btn-open-sound-picker"><span>🔊</span><span>Som</span></button>'}
-          <button class="mb-action" id="btn-open-general-support"><span>❓</span><span>Ajuda</span></button>
-        </div>
       </div>
       <div class="tab-row">
         <button class="tab-btn ${state.motoboyTab==='disponiveis'?'active':''}" data-tab="disponiveis">Disponíveis${disponiveis.length?' ('+disponiveis.length+')':''}</button>
@@ -4277,6 +4306,20 @@
       state.supportModal = {orderId: id, reason: 'acidente_emergencia', note: ''};
       render();
     };
+
+    root.querySelectorAll('[data-bn]').forEach(elm=>{
+      elm.onclick = ()=>{
+        const k = elm.getAttribute('data-bn');
+        if(k === 'home') setState({screen:'motoboy-dash'});
+        else if(k === 'earnings'){
+          state.historyDateFilter = 'todas';
+          state.historyStatusFilter = 'todas';
+          setState({screen:'history-motoboy'});
+        }
+        else if(k === 'profile') setState({screen:'profile'});
+        else if(k === 'help') openSupportModal(null);
+      };
+    });
 
     function wirePhoto(btnId, inputId, onFile){
       const btn = $('#' + btnId), input = $('#' + inputId);
