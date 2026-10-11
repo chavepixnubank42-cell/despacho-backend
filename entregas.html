@@ -1100,7 +1100,7 @@
   .mb-delta.is-up{color:var(--mb-green);}
   .mb-delta.is-down{color:var(--orange);}
   .mb-map-card{position:relative;margin-bottom:14px;}
-  .mb-map-card #motoboy-home-map{position:relative;z-index:0;height:220px;border-radius:16px;overflow:hidden;background:#1c1f1c;border:1px solid var(--border);}
+  .mb-map-card #motoboy-home-map{position:relative;z-index:0;height:clamp(320px,44vh,440px);border-radius:16px;overflow:hidden;background:#1c1f1c;border:1px solid var(--border);}
   .mb-map-pill{position:absolute;top:10px;left:10px;z-index:5;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:6px 12px;font-size:12px;}
   .mb-avail-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:14px;margin-bottom:18px;}
   .mb-avail-top{display:flex;align-items:center;gap:12px;}
@@ -1137,6 +1137,14 @@
   .bn-item.active{color:var(--mb-green);background:rgba(53,224,138,.08);}
   .bn-ico{font-size:20px;line-height:1.1;}
   .has-bottom-nav main{padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));}
+  /* ===== Cartão "Ficar disponível" flutuando sobre o mapa ===== */
+  .mb-avail-float{position:absolute;left:10px;right:10px;bottom:10px;z-index:5;margin-bottom:0;padding:10px 12px;border-radius:16px;background:rgba(27,30,35,.93);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:0 6px 18px rgba(0,0,0,.35);}
+  :root[data-theme="light"] .mb-avail-float{background:rgba(255,255,255,.95);}
+  .mb-avail-float .mb-avail-top{gap:10px;}
+  .mb-avail-float .mb-avail-icon{width:40px;height:40px;font-size:19px;}
+  .mb-avail-float .mb-avail-title{font-size:15px;}
+  .mb-avail-float .mb-avail-sub{font-size:11.5px;}
+  .mb-chip{flex-shrink:0;background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:6px 9px;border-radius:16px;cursor:pointer;white-space:nowrap;}
 </style>
 </head>
 <body>
@@ -3641,23 +3649,23 @@
       <div class="mb-map-card">
         <div id="motoboy-home-map"></div>
         <div class="mb-map-pill">📍 Sua localização</div>
+        <div class="mb-avail-card mb-avail-float">
+          <div class="mb-avail-top">
+            <div class="mb-avail-icon">🏍️</div>
+            <div class="mb-avail-text">
+              <div class="mb-avail-title">Ficar disponível</div>
+              <div class="mb-avail-sub">${online ? 'Recebendo corridas' : curStatus==='pausado' ? '🟡 Pausado' : 'Receba corridas automaticamente'}</div>
+            </div>
+            ${online ? '<button class="mb-chip" data-set-status="pausado">⏸ Pausar</button>' : (curStatus==='pausado' ? '<button class="mb-chip" data-set-status="offline">⚪ Off-line</button>' : '')}
+            <button class="mb-switch ${online?'is-on':''}" data-set-status="${online?'offline':'online'}" aria-label="Ficar disponível"></button>
+          </div>
+        </div>
       </div>
       ${!liveGeo && online ? '<div class="field-hint" style="margin-top:-10px;margin-bottom:16px;">📡 Obtendo sua localização…</div>' : ''}
       ${curStatus==='pausado' && state.profile.forcedPauseUntil && state.profile.forcedPauseUntil > Date.now()
         ? `<div class="field-hint" style="margin-bottom:16px;color:#FF6A6A;">⏸️ Pausa automática: você perdeu a última corrida por não chegar a tempo na retirada. Você volta a poder ficar on-line <span id="forced-pause-countdown" data-until="${state.profile.forcedPauseUntil}">em instantes</span>.</div>`
         : curStatus==='pausado' ? `<div class="field-hint" style="margin-bottom:16px;">Pausado: você não recebe corridas novas, mas continua podendo terminar uma corrida já em andamento.</div>` : ''}
-      
-      <div class="mb-avail-card">
-        <div class="mb-avail-top">
-          <div class="mb-avail-icon">🏍️</div>
-          <div class="mb-avail-text">
-            <div class="mb-avail-title">Ficar disponível</div>
-            <div class="mb-avail-sub">${online ? 'Você está recebendo corridas' : curStatus==='pausado' ? '🟡 Pausado — não recebe corridas novas' : 'Receba corridas automaticamente'}</div>
-          </div>
-          <button class="mb-switch ${online?'is-on':''}" data-set-status="${online?'offline':'online'}" aria-label="Ficar disponível"></button>
-        </div>
-        ${online ? '<button class="mb-pause-btn" data-set-status="pausado">🟡 Pausar por um momento</button>' : (curStatus==='pausado' ? '<button class="mb-pause-btn" data-set-status="offline">⚪ Ficar off-line</button>' : '')}
-      </div>
+
       <div class="tab-row">
         <button class="tab-btn ${state.motoboyTab==='disponiveis'?'active':''}" data-tab="disponiveis">Disponíveis${disponiveis.length?' ('+disponiveis.length+')':''}</button>
         <button class="tab-btn ${state.motoboyTab==='ativa'?'active':''}" data-tab="ativa">Em andamento</button>
