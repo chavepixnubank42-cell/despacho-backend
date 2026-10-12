@@ -1145,6 +1145,14 @@
   .mb-avail-float .mb-avail-title{font-size:15px;}
   .mb-avail-float .mb-avail-sub{font-size:11.5px;}
   .mb-chip{flex-shrink:0;background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:6px 9px;border-radius:16px;cursor:pointer;white-space:nowrap;}
+  /* ===== Pagamento e tipo da corrida ===== */
+  .pay-options{display:flex;gap:8px;}
+  .pay-opt{flex:1;margin:0;cursor:pointer;text-transform:none;letter-spacing:0;}
+  .pay-opt input{display:none;}
+  .pay-opt span{display:block;text-align:center;padding:11px 6px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:13px;color:var(--text);font-family:var(--font-body);text-transform:none;letter-spacing:0;}
+  .pay-opt input:checked + span{border-color:var(--lime);color:var(--lime);background:rgba(198,255,61,.08);}
+  .order-info{margin-top:10px;font-size:12px;line-height:1.6;color:var(--muted);}
+  .order-info strong{color:var(--text);}
 </style>
 </head>
 <body>
@@ -1884,12 +1892,36 @@
     render();
   }
 
+  // Guarda o que foi digitado na nova corrida: se aparecer um aviso (que redesenha a
+  // tela), o formulário volta como estava em vez de ficar em branco.
+  function snapshotNewOrderForm(form){
+    const fd = new FormData(form);
+    const rt = form.querySelector('#new-order-round-trip');
+    state.newOrderFormSnapshot = {
+      pickupAddress: (fd.get('pickupAddress')||'').toString(),
+      deliveryAddress: (fd.get('deliveryAddress')||'').toString(),
+      value: (fd.get('value')||'').toString(),
+      note: (fd.get('note')||'').toString(),
+      paymentMethod: (fd.get('paymentMethod')||'').toString(),
+      roundTrip: !!(rt && rt.checked)
+    };
+  }
+  // Linha informativa para o motoboy (e para o comércio conferir): forma de pagamento + só ida / ida e volta.
+  function orderInfoBadges(o){
+    const pays = { pix: '⚡ Pix', cash: '💵 Dinheiro', card: '💳 Cartão' };
+    const parts = [];
+    if(pays[o.paymentMethod]) parts.push('Pagamento: <strong>' + pays[o.paymentMethod] + '</strong>' + (o.paymentMethod === 'cash' ? ' (não passa pelo app)' : ''));
+    parts.push(o.roundTrip ? '🔁 <strong>Ida e volta</strong> — volte ao comércio' : '➡️ <strong>Só ida</strong>');
+    return '<div class="order-info">' + parts.join(' · ') + '</div>';
+  }
+
   async function createOrder(data){
     const result = await apiPost('/api/orders', {
       businessId: state.myId,
       pickupAddress: data.pickupAddress,
       deliveryAddress: data.deliveryAddress,
       value: data.value,
+      paymentMethod: data.paymentMethod,
       note: data.note,
       deliveryCoordsOverride: data.deliveryCoordsOverride || null,
       roundTrip: !!data.roundTrip
@@ -2049,6 +2081,7 @@
           deliveryAddress: (fd.get('deliveryAddress')||'').toString(),
           value: (fd.get('value')||'').toString(),
           note: (fd.get('note')||'').toString(),
+          paymentMethod: (fd.get('paymentMethod')||'').toString(),
           roundTrip: !!(roundTripBox && roundTripBox.checked)
         };
       }
@@ -3761,7 +3794,7 @@
     // which only make sense before the package is picked up. This just
     // flags it for the support team; it doesn't resolve anything by itself.
     const contactBtn = `<button type="button" class="btn-secondary" style="margin-top:12px;" data-open-contact="${o.id}">📞 Contato com o comércio / emergência</button>` + renderContactLog(o);
-    const supportLink = contactBtn + (o.support && o.support.status === 'aberto'
+    const supportLink = orderInfoBadges(o) + contactBtn + (o.support && o.support.status === 'aberto'
       ? `<div class="support-flag">⚠️ Suporte avisado — aguardando retorno</div>`
       : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>`);
     if(o.status === 'aceito'){
@@ -3773,7 +3806,7 @@
           </div>
           <div class="active-ride-sub">até a retirada</div>
           ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
-          ${renderGpsLock(o, 'pickupCoords', 'pickup', 'data-arrive-pickup', '📍 Cheguei na retirada')}
+          ${renderGpsLock(o, 'pickupCoords', 'pickup', 'data-arrive-pickup', '📍 Cheguei ao comércio')}
           ${giveUpLink}
           ${supportLink}
         </div>
@@ -3788,7 +3821,7 @@
           </div>
           ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
           <div class="active-ride-hint">Colete o pedido e toque em sair quando estiver pronto.</div>
-          <button class="btn-stage" data-depart="${o.id}">🚀 Saí para a entrega</button>
+          <button class="btn-stage" data-depart="${o.id}">🚀 Saída</button>
           ${cancelLink}
           ${supportLink}
         </div>
@@ -3803,7 +3836,7 @@
           </div>
           <div class="active-ride-sub">até a entrega</div>
           ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
-          ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei na entrega')}
+          ${renderGpsLock(o, 'deliveryCoords', 'delivery', 'data-arrive-delivery', '📍 Cheguei ao cliente')}
           ${supportLink}
         </div>
       `;
@@ -3818,7 +3851,7 @@
             </div>
             ${renderAddressLine(o.deliveryAddress, o.deliveryCoords)}
             <div class="active-ride-hint">🔁 Essa corrida é ida e volta. Entregue/pegue o que for necessário e toque em voltar quando estiver pronto.</div>
-            <button class="btn-stage" style="width:100%;margin-top:10px;" data-depart-return="${o.id}">🔁 Voltar para a retirada</button>
+            <button class="btn-stage" style="width:100%;margin-top:10px;" data-depart-return="${o.id}">🔁 Retornar ao comércio</button>
             ${supportLink}
           </div>
         `;
@@ -3842,7 +3875,7 @@
             <span class="active-ride-label">🔁 Voltando para a retirada</span>
           </div>
           ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
-          ${renderGpsLock(o, 'pickupCoords', 'return', 'data-arrive-return', '📍 Cheguei de volta')}
+          ${renderGpsLock(o, 'pickupCoords', 'return', 'data-arrive-return', '📍 Cheguei ao comércio')}
           ${supportLink}
         </div>
       `;
@@ -3856,7 +3889,7 @@
         </div>
         ${renderAddressLine(o.pickupAddress, o.pickupCoords)}
         <div class="active-ride-hint">Chegou de volta — confirme para concluir a corrida.</div>
-        <button class="btn-deliver" style="width:100%;margin-top:10px;" data-complete-return="${o.id}">✅ Concluir corrida</button>
+        <button class="btn-deliver" style="width:100%;margin-top:10px;" data-complete-return="${o.id}">✅ Finalizar entrega</button>
         ${supportLink}
       </div>
     `;
@@ -3950,6 +3983,7 @@
             </div>
           </div>
         </div>
+        ${orderInfoBadges(o)}
         ${o.note ? `<div class="ticket-meta" style="margin-top:12px;">✎ ${esc(o.note)}</div>` : ''}
         ${o.status==='cancelado' && o.cancelReason ? `<div class="ticket-meta" style="margin-top:12px;color:var(--muted);">🚫 Cancelada por ${o.cancelledBy==='business'?'comércio':'motoboy'} — ${esc(o.cancelReason)}${o.cancelNote?': '+esc(o.cancelNote):''}</div>` : ''}
       </div>
@@ -4043,9 +4077,16 @@
             <label>Observações (opcional)</label>
             <textarea name="note" placeholder="Ex: entregar na portaria, pedido embalado, etc">${esc(vNote)}</textarea>
           </div>
+          <div class="field">
+            <label>Forma de pagamento do cliente</label>
+            <div class="pay-options">
+              ${[['pix','⚡ Pix'],['cash','💵 Dinheiro'],['card','💳 Cartão']].map(([k,l]) => `<label class="pay-opt"><input type="radio" name="paymentMethod" value="${k}" ${snap.paymentMethod===k?'checked':''}><span>${l}</span></label>`).join('')}
+            </div>
+            <div class="field-hint">É só para avisar o motoboy do que fazer. Dinheiro não passa pelo app.</div>
+          </div>
           <div class="field" style="flex-direction:row;align-items:center;gap:8px;">
             <input type="checkbox" id="new-order-round-trip" name="roundTrip" ${snap.roundTrip ? 'checked' : ''} style="width:auto;">
-            <label for="new-order-round-trip" style="margin:0;font-size:13px;">🔁 Ida e volta (o motoboy espera e retorna com algo)</label>
+            <label for="new-order-round-trip" style="margin:0;font-size:13px;">🔁 Ida e volta — o motoboy volta ao comércio depois da entrega (o retorno é obrigatório)</label>
           </div>
           <button type="button" id="btn-submit-order" class="btn-primary">Chamar motoboy</button>
         </form>
@@ -4491,6 +4532,7 @@
     const btnSubmitOrder = $('#btn-submit-order');
     if(btnSubmitOrder && formNewOrder) btnSubmitOrder.onclick = ()=>{
       try{
+        snapshotNewOrderForm(formNewOrder);
         const fd = new FormData(formNewOrder);
         const pickupAddress = (fd.get('pickupAddress')||'').toString().trim();
         const deliveryAddress = (fd.get('deliveryAddress')||'').toString().trim();
@@ -4501,6 +4543,11 @@
         }
         if(!value || value <= 0){
           showToast('Informe um valor válido para a corrida');
+          return;
+        }
+        const paymentMethod = (fd.get('paymentMethod')||'').toString();
+        if(!['pix','cash','card'].includes(paymentMethod)){
+          showToast('Escolha a forma de pagamento do cliente');
           return;
         }
         // Se a busca de endereço não achou o número exato da casa e o
@@ -4514,7 +4561,7 @@
         }
         btnSubmitOrder.disabled = true;
         btnSubmitOrder.textContent = 'Enviando…';
-        createOrder({ pickupAddress, deliveryAddress, value, note: fd.get('note'), deliveryCoordsOverride: state.newOrderDeliveryCoords, roundTrip: fd.get('roundTrip') === 'on' });
+        createOrder({ pickupAddress, deliveryAddress, value, paymentMethod, note: fd.get('note'), deliveryCoordsOverride: state.newOrderDeliveryCoords, roundTrip: fd.get('roundTrip') === 'on' });
       }catch(err){
         console.error('Falha ao criar corrida', err);
         showToast('Deu um erro ao solicitar. Tenta de novo.');

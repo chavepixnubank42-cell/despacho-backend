@@ -1930,7 +1930,13 @@ function saveRecentAddress(business, address, coords) {
 
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
-  const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip } = req.body || {};
+  const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip, paymentMethod } = req.body || {};
+  // Forma de pagamento do cliente: só informativa, para o motoboy saber o que fazer
+  // (dinheiro não passa pelo app). Corridas feitas por apps antigos podem vir sem ela.
+  const PAYMENT_METHODS = ['pix', 'cash', 'card'];
+  if (paymentMethod && !PAYMENT_METHODS.includes(paymentMethod)) {
+    return res.status(400).json({ error: 'Forma de pagamento inválida' });
+  }
   // TEMP DEBUG — investigando um relato de valor de entrega chegando errado
   // (ex: comércio digitou 8, entrega saiu com 7.98). Isto grava exatamente
   // o que chegou no corpo da requisição, antes de qualquer parseFloat, pra
@@ -1994,6 +2000,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     debugRawValue: value, // TEMP DEBUG — o que chegou cru no corpo da requisição, antes do parseFloat. Remover depois.
     note: note || '',
     roundTrip: !!roundTrip, // motoboy needs to come back to the pickup point before the order counts as done
+    paymentMethod: paymentMethod || null, // 'pix' | 'cash' | 'card' — só informativo
     status: 'pendente',
     motoboyId: null,
     motoboyName: null,
