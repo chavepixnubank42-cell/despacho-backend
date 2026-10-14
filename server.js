@@ -1930,7 +1930,7 @@ function saveRecentAddress(business, address, coords) {
 
 app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const businessId = req.authId;
-  const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip, paymentMethod } = req.body || {};
+  const { pickupAddress, deliveryAddress, value, note, deliveryCoordsOverride, roundTrip, paymentMethod, requestId } = req.body || {};
   // Forma de pagamento do cliente: só informativa, para o motoboy saber o que fazer
   // (dinheiro não passa pelo app). Corridas feitas por apps antigos podem vir sem ela.
   const PAYMENT_METHODS = ['pix', 'cash', 'card'];
@@ -2001,6 +2001,7 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
     note: note || '',
     roundTrip: !!roundTrip, // motoboy needs to come back to the pickup point before the order counts as done
     paymentMethod: paymentMethod || null, // 'pix' | 'cash' | 'card' — só informativo
+    requestId: requestId ? String(requestId).slice(0, 60) : null, // evita corrida duplicada se o pedido for reenviado
     status: 'pendente',
     motoboyId: null,
     motoboyName: null,
@@ -2025,6 +2026,12 @@ app.post('/api/orders', requireAuth('business'), async (req, res) => {
   const freshDb = loadDB();
   const freshBusiness = freshDb.businesses[businessId];
   if (!freshBusiness) return res.status(404).json({ error: 'Comércio não encontrado' });
+  // Mesmo pedido enviado duas vezes (ex.: a resposta se perdeu e a pessoa tentou de novo):
+  // devolve a corrida que já foi criada, sem cobrar crédito de novo.
+  if (requestId) {
+    const dupe = Object.values(freshDb.orders).find((x) => x.businessId === businessId && x.requestId === String(requestId).slice(0, 60));
+    if (dupe) return res.json(dupe);
+  }
   const freeFinal = hasFreeCredits(freshBusiness); // re-checked fresh, same reasoning as freeNow above
   if (!freeFinal && (freshBusiness.credits || 0) < CREDIT_COST_PER_RIDE) {
     return res.status(402).json({ error: 'Créditos insuficientes — adicione créditos para solicitar esta entrega.' });
@@ -2312,6 +2319,8 @@ function stageTransition(fromStatus, toStatus, extraFields) {
     const o = db.orders[req.params.id];
     if (!o) return res.status(404).json({ error: 'Não encontrado' });
     if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+    // Repetição de um toque já processado (ex.: a resposta se perdeu): devolve como está, sem refazer nada.
+    if (o.status === toStatus) return res.json(o);
     if (o.status !== fromStatus) {
       return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
     }
@@ -2333,6 +2342,8 @@ function arrivalTransition(fromStatus, toStatus, coordsField, extraFields) {
     const o = db.orders[req.params.id];
     if (!o) return res.status(404).json({ error: 'Não encontrado' });
     if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+    // Repetição de um toque já processado (ex.: a resposta se perdeu): devolve como está, sem refazer nada.
+    if (o.status === toStatus) return res.json(o);
     if (o.status !== fromStatus) {
       return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
     }
@@ -2423,6 +2434,7 @@ app.post('/api/orders/:id/deliver', requireAuth('motoboy'), (req, res) => {
   if (o.roundTrip) {
     return res.status(409).json({ error: 'Essa corrida é ida e volta — confirme a volta antes de concluir.' });
   }
+  if (o.status === 'entregue') return res.json(o); // repetição de um toque já processado
   if (o.status !== 'no_local_entrega') {
     return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
   }
@@ -2444,6 +2456,7 @@ app.post('/api/orders/:id/depart-return', requireAuth('motoboy'), (req, res) => 
   if (!o) return res.status(404).json({ error: 'Não encontrado' });
   if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
   if (!o.roundTrip) return res.status(409).json({ error: 'Essa corrida não é ida e volta' });
+  if (o.status === 'retornando') return res.json(o); // repetição de um toque já processado
   if (o.status !== 'no_local_entrega') {
     return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
   }
@@ -2467,6 +2480,7 @@ app.post('/api/orders/:id/complete-return', requireAuth('motoboy'), (req, res) =
   const o = db.orders[req.params.id];
   if (!o) return res.status(404).json({ error: 'Não encontrado' });
   if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (o.status === 'entregue' && o.roundTrip) return res.json(o); // repetição de um toque já processado
   if (o.status !== 'no_local_retorno') {
     return res.status(409).json({ error: 'Etapa inválida — status atual: ' + o.status });
   }
