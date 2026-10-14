@@ -2077,6 +2077,66 @@
   let motoboyHomeMarker = null;
   let motoboyTargetMarker = null;
   let currentMotoboyActiveOrder = null; // definido a cada render de renderMotoboyDash
+  // ---------- rota no mapa (linha do motoboy até o destino) ----------
+  // O servidor consulta o Mapbox (o token fica só lá) — aqui só desenhamos a
+  // linha e mostramos distância/tempo. Pedimos de novo só quando o destino
+  // muda, ou depois de 20s se o motoboy andou mais de 40m, para não gastar
+  // o limite grátis à toa.
+  let motoboyRouteLine = null;
+  let motoboyRouteInfo = null;      // {km, min}
+  let motoboyRouteFetching = false;
+  let motoboyRouteReq = {t:0, lat:0, lng:0, key:''};
+  function updateMotoboyRoutePill(){
+    const pill = document.querySelector('.mb-map-pill');
+    if(!pill) return;
+    const txt = motoboyRouteInfo
+      ? '🧭 ' + motoboyRouteInfo.km + ' km · ' + motoboyRouteInfo.min + ' min'
+      : '📍 Sua localização';
+    if(pill.textContent !== txt) pill.textContent = txt;
+  }
+  function clearMotoboyRoute(){
+    if(motoboyHomeMap && motoboyRouteLine){ try{ motoboyHomeMap.removeLayer(motoboyRouteLine); }catch(e){} }
+    motoboyRouteLine = null;
+    motoboyRouteInfo = null;
+    motoboyRouteFetching = false;
+    motoboyRouteReq = {t:0, lat:0, lng:0, key:''};
+  }
+  async function maybeFetchMotoboyRoute(target){
+    if(!motoboyHomeMap || !liveGeo || !target || motoboyRouteFetching) return;
+    const key = target.lat.toFixed(5) + ',' + target.lng.toFixed(5);
+    const now = Date.now();
+    const r = motoboyRouteReq;
+    if(r.key === key){
+      if(now - r.t < 20000) return;
+      const moved = haversineMeters(r.lat, r.lng, liveGeo.lat, liveGeo.lng);
+      if(motoboyRouteLine && moved < 40) return;
+    } else if(now - r.t < 5000){
+      return;
+    }
+    if(r.key && r.key !== key) clearMotoboyRoute(); // destino mudou: apaga a linha velha
+    motoboyRouteFetching = true;
+    motoboyRouteReq = {t:now, lat:liveGeo.lat, lng:liveGeo.lng, key:key};
+    const q = '/api/route?fromLat=' + liveGeo.lat + '&fromLng=' + liveGeo.lng + '&toLat=' + target.lat + '&toLng=' + target.lng;
+    let data = null;
+    try{ data = await apiGet(q); }catch(e){ data = null; }
+    motoboyRouteFetching = false;
+    if(!motoboyHomeMap || motoboyRouteReq.key !== key) return; // mapa fechou ou destino mudou enquanto esperava
+    const route = data && data.route;
+    if(!route || !Array.isArray(route.coordinates) || route.coordinates.length < 2) return; // sem rota: fica só o pino, como antes
+    const firstDraw = !motoboyRouteLine;
+    if(firstDraw){
+      motoboyRouteLine = L.polyline(route.coordinates, {color:'#1a73e8', weight:5, opacity:0.85}).addTo(motoboyHomeMap);
+      try{
+        motoboyHomeMap.fitBounds(motoboyRouteLine.getBounds(), {paddingTopLeft:[40,50], paddingBottomRight:[40,150], maxZoom:17});
+      }catch(e){}
+    } else {
+      motoboyRouteLine.setLatLngs(route.coordinates);
+    }
+    motoboyRouteInfo = {
+      km: (route.distance/1000).toFixed(1).replace('.', ','),
+      min: Math.max(1, Math.round(route.duration/60))
+    };
+  }
   function initMotoboyHomeMap(){
     if(typeof L === 'undefined') return; // sem internet na primeira carga, por exemplo
     const start = liveGeo || {lat:-21.857592, lng:-47.477454}; // fallback: Porto Ferreira, até termos um fix de GPS
@@ -2090,6 +2150,10 @@
     motoboyHomeMapContainer = null;
     motoboyHomeMarker = null;
     motoboyTargetMarker = null;
+    motoboyRouteLine = null;
+    motoboyRouteInfo = null;
+    motoboyRouteFetching = false;
+    motoboyRouteReq = {t:0, lat:0, lng:0, key:''};
   }
 
   // mode: 'business' (marca a localização fixa da loja, salva no perfil) ou
@@ -4966,6 +5030,13 @@
         motoboyHomeMap.removeLayer(motoboyTargetMarker);
         motoboyTargetMarker = null;
       }
+      // Rota até o destino (linha azul + distância/tempo no canto do mapa)
+      if(target){
+        maybeFetchMotoboyRoute(target);
+      } else if(motoboyRouteLine || motoboyRouteInfo){
+        clearMotoboyRoute();
+      }
+      updateMotoboyRoutePill();
     }
 
   }, 1000);
