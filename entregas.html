@@ -1206,6 +1206,29 @@
     }catch(e){ /* não crítico — o padding do CSS já ajuda mesmo sem isso */ }
   })();
 
+  // ---------- atualização ao vivo da tela (Capgo) ----------
+  // Avisa o atualizador que esta versão da tela abriu normalmente. Sem esse aviso ele
+  // acha que a versão nova está quebrada e volta para a anterior. Só existe dentro do
+  // app instalado; no navegador (comércio, admin) não faz nada.
+  (function notifyLiveUpdateReady(){
+    try{
+      const up = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorUpdater;
+      if(up && typeof up.notifyAppReady === 'function'){ up.notifyAppReady(); }
+    }catch(e){ /* fora do app: não há o que avisar */ }
+  })();
+  // Descobre qual versão da tela está rodando (aparece no Perfil), para conferir se a
+  // atualização chegou. "de fábrica" = a que veio dentro do .apk instalado.
+  async function loadScreenVersion(){
+    try{
+      const up = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorUpdater;
+      if(up && typeof up.current === 'function'){
+        const cur = await up.current();
+        const v = cur && cur.bundle && cur.bundle.version;
+        state.screenVersion = (!v || v === 'builtin') ? 'de fábrica' : String(v);
+      }
+    }catch(e){ /* sem o plugin: não mostra nada */ }
+  }
+
   // ---------- storage helpers ----------
   // Wraps a promise so it always settles within `ms`, even if the network
   // request never responds — this is what previously made things hang
@@ -1345,12 +1368,12 @@
         headers: Object.assign({'Content-Type':'application/json'}, authHeaders()),
         body: JSON.stringify(body||{})
       }), 6000);
-      if(!res) return {error:'O servidor demorou demais para responder'};
+      if(!res) return {error:'O servidor demorou demais para responder', networkError:true};
       const data = await res.json().catch(()=>null);
       if(res.status === 401){ handleAuthFailure(); return {error:(data&&data.error)||'Sessão expirada'}; }
       if(!res.ok) return {error: (data && data.error) || 'Erro no servidor'};
       return data || {};
-    }catch(e){ console.error('API POST falhou', path, e); return {error:'Não consegui falar com o servidor'}; }
+    }catch(e){ console.error('API POST falhou', path, e); return {error:'Não consegui falar com o servidor', networkError:true}; }
   }
   async function apiPatch(path, body){
     if(!state.apiBase) return {error:'Servidor não configurado'};
@@ -1635,6 +1658,7 @@
 
   // ---------- init ----------
   async function init(){
+    loadScreenVersion();
     state.apiBase = (await getJSON('api-base-url', false)) || DEFAULT_API_BASE;
     state.apiOk = await apiSelfTest();
     state.soundPref = (await getJSON('sound-pref', false)) || {type:'preset', preset:'padrao'};
@@ -1693,7 +1717,9 @@
 
   async function refreshOrders(){
     if(state.role === 'business'){
-      const orders = (await apiGet('/api/orders')) || [];
+      const ordersRaw = await apiGet('/api/orders');
+      if(ordersRaw === null) return; // sem conexão ou erro: mantém o que já está na tela
+      const orders = ordersRaw;
       orders.sort((a,b)=> b.createdAt - a.createdAt);
 
       if(!notifyFirstLoad){
@@ -1720,6 +1746,7 @@
         apiGet('/api/orders'),
         isOnline ? apiGet('/api/orders/available') : Promise.resolve([])
       ]);
+      if(mineRaw === null) return; // sem conexão ou erro: mantém a corrida que já está na tela
       const mine = (mineRaw || []).filter(o => o.status !== 'pendente');
       const available = (availableRaw || []).slice();
       mine.sort((a,b)=> b.createdAt - a.createdAt);
@@ -1741,7 +1768,7 @@
         state.incomingAlert = null;
       }
 
-      state.orders = mine;
+      state.orders = applyActionQueue(mine);
       state.availableOrders = available;
     } else {
       state.orders = [];
@@ -1775,6 +1802,7 @@
   function startPolling(){
     if(pollHandle) clearInterval(pollHandle);
     pollHandle = setInterval(async ()=>{
+      flushActionQueue(); // envia as ações guardadas assim que a conexão volta
       // Don't disrupt any open form/sheet — re-rendering while the person
       // is typing would reset the field and make it look like it's blinking.
       // The profile screen has its own free-text inputs (name/phone/e-mail/
@@ -1922,12 +1950,16 @@
       deliveryAddress: data.deliveryAddress,
       value: data.value,
       paymentMethod: data.paymentMethod,
+      requestId: state.newOrderRequestId || null,
       note: data.note,
       deliveryCoordsOverride: data.deliveryCoordsOverride || null,
       roundTrip: !!data.roundTrip
     });
-    if(result.error){ showToast(result.error); return; }
-    setState({modal:null, newOrderDeliveryCoords:null, newOrderDeliveryPrecise:null, newOrderFormSnapshot:null});
+    if(result.error){
+      showToast(result.networkError ? 'Sem resposta do servidor. Toque em "Chamar motoboy" de novo — se a corrida já tiver sido criada, ela não será duplicada.' : result.error);
+      return;
+    }
+    setState({modal:null, newOrderDeliveryCoords:null, newOrderDeliveryPrecise:null, newOrderFormSnapshot:null, newOrderRequestId:null});
     await refreshOrders();
     render();
     showToast(result.offerQueue && result.offerQueue.length>0
@@ -2544,8 +2576,90 @@
     showToast('Corrida devolvida — foi para o próximo motoboy da fila');
   }
 
+  // ---------- fila de ações para quando a internet cai ----------
+  // Só as etapas da corrida em andamento entram na fila (aceitar/recusar uma oferta expira em
+  // 30 s e continua exigindo internet). A fila fica guardada no aparelho e é enviada na ordem
+  // assim que a conexão volta; o servidor ignora repetições, então nada é feito duas vezes.
+  const QUEUE_KEY = 'chegoja:action-queue';
+  const STAGE_FLOW = {
+    'arrive-pickup':   {from:'aceito',            to:'no_local_retirada', stamp:'arrivedPickupAt'},
+    'depart':          {from:'no_local_retirada', to:'em_entrega',        stamp:'departedAt'},
+    'arrive-delivery': {from:'em_entrega',        to:'no_local_entrega',  stamp:'arrivedDeliveryAt'},
+    'deliver':         {from:'no_local_entrega',  to:'entregue',          stamp:'deliveredAt'},
+    'depart-return':   {from:'no_local_entrega',  to:'retornando',        stamp:'returnDepartedAt'},
+    'arrive-return':   {from:'retornando',        to:'no_local_retorno',  stamp:'arrivedReturnAt'},
+    'complete-return': {from:'no_local_retorno',  to:'entregue',          stamp:'deliveredAt'}
+  };
+  let actionQueue = [];
+  try{ actionQueue = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); if(!Array.isArray(actionQueue)) actionQueue = []; }catch(e){ actionQueue = []; }
+  function saveActionQueue(){
+    try{
+      if(actionQueue.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(actionQueue));
+      else localStorage.removeItem(QUEUE_KEY);
+    }catch(e){ /* sem espaço/permissão: a fila continua só na memória */ }
+  }
+  function pendingActionCount(){ return actionQueue.filter(a => a.userId === state.myId).length; }
+  // Mostra a corrida como ela vai ficar quando as ações guardadas forem enviadas.
+  function applyActionQueue(orders){
+    if(!actionQueue.length) return orders;
+    return orders.map(o => {
+      const items = actionQueue.filter(a => a.userId === state.myId && a.orderId === o.id);
+      if(!items.length) return o;
+      const c = Object.assign({}, o);
+      items.forEach(a => {
+        const f = STAGE_FLOW[a.path];
+        if(f && c.status === f.from){ c.status = f.to; c[f.stamp] = a.at; }
+      });
+      return c;
+    });
+  }
+  // Envia uma etapa. Se a internet falhou, guarda na fila e segue em frente como se tivesse enviado.
+  async function sendStage(orderId, path, body){
+    const result = await apiPost('/api/orders/' + orderId + '/' + path, body);
+    if(result && result.networkError && STAGE_FLOW[path]){
+      actionQueue.push({ id: 'a_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), userId: state.myId, orderId, path, body, at: Date.now() });
+      saveActionQueue();
+      state.orders = applyActionQueue(state.orders);
+      render();
+      showToast('📵 Sem internet — sua ação foi guardada e será enviada quando a conexão voltar');
+      return {queued: true};
+    }
+    return result;
+  }
+  let flushingQueue = false;
+  async function flushActionQueue(){
+    if(flushingQueue || !state.authToken || state.isOffline) return;
+    const mine = actionQueue.filter(a => a.userId === state.myId);
+    if(!mine.length) return;
+    flushingQueue = true;
+    let changed = false, rejected = null;
+    try{
+      for(const a of mine){
+        if(!actionQueue.some(x => x.id === a.id)) continue; // já removida (corrida rejeitada antes)
+        const r = await apiPost('/api/orders/' + a.orderId + '/' + a.path, a.body);
+        if(!state.authToken) break;                          // sessão caiu: mantém a fila
+        if(r && r.networkError) break;                       // ainda sem conexão: tenta de novo depois
+        if(r && r.error){                                    // o servidor recusou: a corrida mudou nesse meio tempo
+          actionQueue = actionQueue.filter(x => !(x.userId === a.userId && x.orderId === a.orderId));
+          rejected = r.error;
+        } else {
+          actionQueue = actionQueue.filter(x => x.id !== a.id);
+        }
+        changed = true;
+      }
+    } finally { flushingQueue = false; }
+    if(changed){
+      saveActionQueue();
+      await refreshOrders();
+      render();
+      if(rejected) showToast('A corrida mudou enquanto você estava sem internet — ' + rejected);
+      else if(!pendingActionCount()) showToast('✅ Conexão voltou — ações enviadas');
+    }
+  }
+
   async function arriveAtPickup(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/arrive-pickup', {geo: liveGeo});
+    const result = await sendStage(orderId, 'arrive-pickup', {geo: liveGeo});
+    if(result.queued) return;
     if(result.error){
       await handleArrivalBlocked(result, orderId, 'arrive-pickup', arriveAtPickup);
       return;
@@ -2557,7 +2671,8 @@
   }
 
   async function departToDelivery(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/depart', {});
+    const result = await sendStage(orderId, 'depart', {});
+    if(result.queued) return;
     if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
     await refreshOrders();
     render();
@@ -2565,7 +2680,8 @@
   }
 
   async function arriveAtDelivery(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/arrive-delivery', {geo: liveGeo});
+    const result = await sendStage(orderId, 'arrive-delivery', {geo: liveGeo});
+    if(result.queued) return;
     if(result.error){
       await handleArrivalBlocked(result, orderId, 'arrive-delivery', arriveAtDelivery);
       return;
@@ -2582,7 +2698,8 @@
   // Fica registrado no pedido pra conferência do admin depois.
   async function handleArrivalBlocked(result, orderId, path, retryFn){
     if(result.canOverride && confirm(result.error + '\n\nSe você já está no local e o problema é só o GPS, pode confirmar mesmo assim. Confirmar chegada?')){
-      const result2 = await apiPost('/api/orders/'+orderId+'/'+path, {geo: liveGeo, override:true});
+      const result2 = await sendStage(orderId, path, {geo: liveGeo, override:true});
+      if(result2.queued) return;
       if(result2.error){ showToast(result2.error); await refreshOrders(); render(); return; }
       stopGeoWatch();
       await refreshOrders();
@@ -2596,7 +2713,8 @@
   }
 
   async function markDelivered(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/deliver', {});
+    const result = await sendStage(orderId, 'deliver', {});
+    if(result.queued) return;
     if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
     await refreshOrders();
     render();
@@ -2605,7 +2723,8 @@
 
   // ---- Ida e volta ----
   async function departReturn(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/depart-return', {});
+    const result = await sendStage(orderId, 'depart-return', {});
+    if(result.queued) return;
     if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
     await refreshOrders();
     render();
@@ -2613,7 +2732,8 @@
   }
 
   async function arriveAtReturn(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/arrive-return', {geo: liveGeo});
+    const result = await sendStage(orderId, 'arrive-return', {geo: liveGeo});
+    if(result.queued) return;
     if(result.error){
       await handleArrivalBlocked(result, orderId, 'arrive-return', arriveAtReturn);
       return;
@@ -2625,7 +2745,8 @@
   }
 
   async function completeReturn(orderId){
-    const result = await apiPost('/api/orders/'+orderId+'/complete-return', {});
+    const result = await sendStage(orderId, 'complete-return', {});
+    if(result.queued) return;
     if(result.error){ showToast(result.error); await refreshOrders(); render(); return; }
     await refreshOrders();
     render();
@@ -2839,6 +2960,14 @@
     }
 
     wrap.appendChild(renderTopbar());
+
+    const pendingN = pendingActionCount();
+    if(pendingN > 0){
+      const q = document.createElement('div');
+      q.className = 'sync-warning';
+      q.innerHTML = '⏳ ' + pendingN + (pendingN === 1 ? ' ação guardada — será enviada' : ' ações guardadas — serão enviadas') + ' assim que a internet voltar.';
+      wrap.appendChild(q);
+    }
 
     if(state.isOffline){
       const warn = document.createElement('div');
@@ -3298,6 +3427,7 @@
         <button type="button" class="btn-secondary" id="btn-open-general-support" style="width:100%;">⚠️ Falar com o suporte</button>
         <p class="row-sub" style="margin-top:8px;">Use isso pra qualquer dúvida ou problema, mesmo sem corrida ativa no momento.</p>
       ` : ''}
+      ${(!isBusiness && state.screenVersion) ? `<p class="row-sub" style="margin-top:18px;text-align:center;">Versão da tela: ${esc(state.screenVersion)}</p>` : ''}
       <div style="margin-top:22px;"><button class="btn-secondary" data-goto="${isBusiness?'business-dash':'motoboy-dash'}">← Voltar</button></div>
     `;
     return d;
@@ -4455,7 +4585,7 @@
     };
 
     const btnNewOrder = $('#btn-new-order');
-    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderDeliveryPrecise:null, newOrderFormSnapshot:null});
+    if(btnNewOrder) btnNewOrder.onclick = ()=>setState({modal:'new-order', newOrderDeliveryCoords:null, newOrderDeliveryPrecise:null, newOrderFormSnapshot:null, newOrderRequestId:newId('req')});
 
     const modalClose = $('#modal-close');
     if(modalClose) modalClose.onclick = ()=>setState({modal:null});
