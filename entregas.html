@@ -1159,6 +1159,13 @@
 <div id="app"></div>
 
 <script>
+// Rolar a página (mouse ou touchpad) com o cursor em cima de um campo numérico
+// selecionado muda o número sem querer (8 vira 7,99, 7,98... 7,96). Aqui, ao
+// rolar, o campo numérico perde o foco antes de o navegador mexer no valor.
+document.addEventListener('wheel', function (e) {
+  var el = document.activeElement;
+  if (el && el.tagName === 'INPUT' && el.type === 'number' && el === e.target) el.blur();
+}, { capture: true, passive: true });
 (function(){
 
   // ---------- PWA setup (service worker) ----------
