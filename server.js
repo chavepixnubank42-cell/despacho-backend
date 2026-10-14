@@ -2660,6 +2660,77 @@ setInterval(() => {
   if (changed) saveDB(db);
 }, 5000);
 
+// ---------------------------------------------------------------
+// Rota no mapa do motoboy (Mapbox Directions) — defina MAPBOX_TOKEN como
+// variável de ambiente no servidor (Render: Environment). O token fica só
+// aqui, nunca vai para o entregas.html. Sem ele, a rota simplesmente não
+// aparece e o resto do app continua funcionando igual.
+// ---------------------------------------------------------------
+const MAPBOX_TOKEN = process.env.MAPBOX_TOKEN || '';
+const routeCache = new Map();      // chave de coordenadas -> { t, route }
+const routeLastCall = new Map();   // id do motoboy -> hora da última consulta
+const ROUTE_CACHE_MS = 15 * 1000;
+const ROUTE_MIN_INTERVAL_MS = 5 * 1000; // por motoboy, protege o limite grátis do Mapbox
+
+app.get('/api/route', requireAuth('motoboy'), async (req, res) => {
+  if (!MAPBOX_TOKEN) return res.json({ route: null });
+  const fromLat = parseFloat(req.query.fromLat);
+  const fromLng = parseFloat(req.query.fromLng);
+  const toLat = parseFloat(req.query.toLat);
+  const toLng = parseFloat(req.query.toLng);
+  const okLat = (v) => Number.isFinite(v) && v >= -90 && v <= 90;
+  const okLng = (v) => Number.isFinite(v) && v >= -180 && v <= 180;
+  if (!okLat(fromLat) || !okLat(toLat) || !okLng(fromLng) || !okLng(toLng)) {
+    return res.status(400).json({ error: 'Coordenadas inválidas' });
+  }
+
+  const now = Date.now();
+  const key = [fromLat, fromLng, toLat, toLng].map((n) => n.toFixed(4)).join(',');
+  const cached = routeCache.get(key);
+  if (cached && now - cached.t < ROUTE_CACHE_MS) return res.json({ route: cached.route });
+
+  const last = routeLastCall.get(req.authId) || 0;
+  if (now - last < ROUTE_MIN_INTERVAL_MS) return res.json({ route: null, throttled: true });
+  routeLastCall.set(req.authId, now);
+
+  try {
+    const url = 'https://api.mapbox.com/directions/v5/mapbox/driving/' +
+      fromLng + ',' + fromLat + ';' + toLng + ',' + toLat +
+      '?geometries=geojson&overview=full&access_token=' + encodeURIComponent(MAPBOX_TOKEN);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    let data;
+    try {
+      const r = await fetch(url, { signal: ctrl.signal });
+      if (!r.ok) {
+        console.error('Mapbox Directions respondeu', r.status);
+        return res.json({ route: null });
+      }
+      data = await r.json();
+    } finally {
+      clearTimeout(timer);
+    }
+    const best = data && data.routes && data.routes[0];
+    if (!best || !best.geometry || !Array.isArray(best.geometry.coordinates)) {
+      return res.json({ route: null });
+    }
+    const route = {
+      // Mapbox devolve [lng, lat]; o Leaflet usa [lat, lng]
+      coordinates: best.geometry.coordinates.map((c) => [c[1], c[0]]),
+      distance: best.distance, // metros
+      duration: best.duration, // segundos
+    };
+    routeCache.set(key, { t: now, route });
+    if (routeCache.size > 500) {
+      for (const [k, v] of routeCache) if (now - v.t > ROUTE_CACHE_MS) routeCache.delete(k);
+    }
+    res.json({ route });
+  } catch (e) {
+    console.error('Falha ao buscar rota no Mapbox:', e.message);
+    res.json({ route: null });
+  }
+});
+
 // Serve the front-end (entregas.html) from this same server, so the one
 // Railway URL works both as the API and as the app link people open on
 // their phone. IMPORTANT: only this one file is exposed — never the whole
