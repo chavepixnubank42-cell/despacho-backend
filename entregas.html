@@ -1212,8 +1212,9 @@
   // app instalado; no navegador (comércio, admin) não faz nada.
   (function notifyLiveUpdateReady(){
     try{
-      const up = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorUpdater;
-      if(up && typeof up.notifyAppReady === 'function'){ up.notifyAppReady(); }
+      if(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorUpdater){
+        window.Capacitor.Plugins.CapacitorUpdater.notifyAppReady();
+      }
     }catch(e){ /* fora do app: não há o que avisar */ }
   })();
   // Descobre qual versão da tela está rodando (aparece no Perfil), para conferir se a
