@@ -649,13 +649,34 @@ app.post('/api/admin/orders/:id/return-to-business', requireAuth('admin'), (req,
   if (!o) return res.status(404).json({ error: 'Não encontrado' });
   if (!o.motoboyId) return res.status(409).json({ error: 'Essa corrida não está com um motoboy no momento.' });
   const FORCEABLE_STATUSES = ['aceito', 'no_local_retirada', 'em_entrega', 'no_local_entrega'];
-  if (!FORCEABLE_STATUSES.includes(o.status)) {
+  // Reabrir: se o próprio suporte já "Encerrou" a corrida (a ida fica como
+  // entregue) e depois percebe que o motoboy ainda precisa voltar, dá para
+  // mandar voltar mesmo assim — a corrida sai de "concluída" e vira "retornando".
+  // Corridas concluídas pelo motoboy (não pelo suporte) continuam fechadas.
+  const reopening = o.status === 'entregue' && o.closedBy === 'admin';
+  if (!FORCEABLE_STATUSES.includes(o.status) && !reopening) {
     return res.status(409).json({ error: 'Essa corrida já está voltando ou já foi finalizada.' });
+  }
+  if (reopening) {
+    // O app do motoboy trabalha com uma corrida ativa por vez; não reabrir por cima de outra.
+    const other = Object.values(db.orders).find(
+      (x) => x.id !== o.id && x.motoboyId === o.motoboyId && ACTIVE_STATUSES.includes(x.status)
+    );
+    if (other) {
+      return res.status(409).json({
+        error: 'O motoboy está com outra corrida em andamento (#' + other.id.slice(-6).toUpperCase() +
+          '). Espere ele terminar antes de reabrir esta para a volta.'
+      });
+    }
+    delete o.deliveredAt;
+    delete o.closedBy;
+    delete o.closeReason;
+    o.reopenedByAdminAt = Date.now();
   }
   o.roundTrip = true;
   o.status = 'retornando';
   o.returnDepartedAt = Date.now();
-  if (o.support && o.support.status === 'aberto') {
+  if (o.support && (o.support.status === 'aberto' || (reopening && o.support.resolvedAction === 'encerrada'))) {
     o.support.status = 'resolvido';
     o.support.resolvedAt = Date.now();
     o.support.resolvedAction = 'retorno_forcado';
