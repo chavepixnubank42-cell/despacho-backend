@@ -121,6 +121,12 @@
   .banner-thumb{ width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--border); flex-shrink:0; }
   .mb-photo{width:52px;height:52px;border-radius:50%;object-fit:cover;border:1px solid var(--border);flex-shrink:0;display:block;}
   .mb-photo-empty{display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--muted);}
+  .chat-box{ max-height:200px; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:6px; }
+  .chat-msg{ max-width:86%; padding:7px 10px; border-radius:10px; font-size:13px; line-height:1.4; white-space:pre-wrap; word-break:break-word; }
+  .chat-msg.is-support{ align-self:flex-end; background:rgba(198,255,61,0.12); border:1px solid rgba(198,255,61,0.35); }
+  .chat-msg.is-motoboy{ align-self:flex-start; background:var(--card); border:1px solid var(--border); }
+  .chat-meta{ font-size:10px; color:var(--muted); margin-top:3px; }
+  .hint-box{ margin-top:8px; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:#1B1B22; font-size:12px; line-height:1.45; color:var(--text); }
 </style>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -156,7 +162,8 @@
     bannerModal: null, // {id?, imageUrl, audience, linkType, linkValue, active, priority, startAt, endAt} while the form is open
     freeCreditsModal: null, // {ids, active} while the free-credits confirm dialog is open
     messageModal: null, // {audience, type, title, body, ids} while the compose dialog is open
-    supportActionModal: null // {orderId, action:'end'|'return', note} while the support-action dialog is open
+    supportActionModal: null, // {orderId, action:'end'|'return', note} while the support-action dialog is open
+    chatDrafts: {} // orderId -> texto que o suporte está digitando no chat do chamado
   };
   // Not part of state on purpose — this is view-only (map pan/zoom), and
   // putting it in state would trigger a full re-render loop on every pan.
@@ -307,6 +314,12 @@
       // on the Mensagens tab (those aren't tracked in state, so a re-render
       // would wipe them outright).
       if(state.editingId || state.freeCreditsModal || state.messageModal || state.supportActionModal || state.bannerModal || state.tab === 'mensagens') return;
+      if(state.tab === 'suporte' && chatTypingNow()){
+        // Está digitando no chat: atualiza só as mensagens, sem refazer a tela.
+        await loadAll();
+        refreshChatBoxesInPlace();
+        return;
+      }
       await loadAll();
       if(state.tab === 'relatorios') await loadReport();
       render();
@@ -523,6 +536,43 @@
     state.messageModal = null;
     state.selectedBusinessIds.clear();
     state.selectedMotoboyIds.clear();
+    await loadAll();
+    render();
+  }
+
+  // ---------- chat do chamado (suporte <-> motoboy) ----------
+  function chatMessagesHtml(o){
+    const msgs = Array.isArray(o.supportChat) ? o.supportChat : [];
+    if(!msgs.length) return '<div class="row-sub">Nenhuma mensagem ainda.</div>';
+    return msgs.map(m => `
+      <div class="chat-msg ${m.from==='suporte'?'is-support':'is-motoboy'}">
+        <div>${esc(m.text)}</div>
+        <div class="chat-meta">${m.from==='suporte'?'Suporte':esc(o.motoboyName||'Motoboy')} · ${formatDateTime(m.at)}</div>
+      </div>`).join('');
+  }
+  // Atualiza só as caixas de mensagem na tela (sem refazer tudo), para não
+  // apagar o que o suporte está digitando quando chega resposta nova.
+  function refreshChatBoxesInPlace(){
+    document.querySelectorAll('[data-chat-box]').forEach(box=>{
+      const o = (state.supportTickets||[]).find(t=>t.id===box.getAttribute('data-chat-box'));
+      if(!o) return;
+      const nearBottom = (box.scrollHeight - box.scrollTop - box.clientHeight) < 40;
+      box.innerHTML = chatMessagesHtml(o);
+      if(nearBottom) box.scrollTop = box.scrollHeight;
+    });
+  }
+  function chatTypingNow(){
+    const ae = document.activeElement;
+    if(ae && ae.classList && ae.classList.contains('chat-input')) return true;
+    return Object.values(state.chatDrafts).some(v => v && v.trim());
+  }
+  async function sendSupportChat(orderId){
+    const text = (state.chatDrafts[orderId]||'').trim();
+    if(!text){ showToast('Escreva a mensagem'); return; }
+    const result = await api('POST', '/api/admin/orders/'+orderId+'/support-chat', { text });
+    if(result.error){ showToast(result.error); return; }
+    delete state.chatDrafts[orderId];
+    showToast('💬 Mensagem enviada ao motoboy');
     await loadAll();
     render();
   }
@@ -778,18 +828,50 @@
     } else if(state.tab === 'suporte'){
       const abertos = (state.supportTickets||[]).filter(t=>t.support.status==='aberto');
       const resolvidos = (state.supportTickets||[]).filter(t=>t.support.status==='resolvido').slice(0,20);
+      // Explica ao suporte o que cada botão faz NESTA corrida (só ida ou ida e volta).
+      const rideKindHint = (o) => {
+        if(o.roundTrip){
+          if(o.status === 'retornando' || o.status === 'no_local_retorno'){
+            return '🔁 <strong>Ida e volta</strong> — o motoboy já está na <strong>volta</strong>. <em>Encerrar corrida</em> conclui tudo agora, sem esperar ele chegar de volta.';
+          }
+          return '🔁 <strong>Ida e volta</strong> — o motoboy ainda precisa <strong>voltar ao comércio</strong>. <em>Voltar para o comércio</em> encerra a ida e manda ele voltar (a corrida só conclui quando ele chega). <em>Encerrar corrida</em> conclui tudo <strong>sem a volta</strong>.';
+        }
+        return '➡️ <strong>Só ida</strong> — <em>Encerrar corrida</em> conclui a entrega. Use <em>Voltar para o comércio</em> só se ele precisar levar algo de volta (a corrida passa a ser ida e volta).';
+      };
+      const chatBox = (o, isOpen) => {
+        const msgs = Array.isArray(o.supportChat) ? o.supportChat : [];
+        const canWrite = !!o.motoboyId && o.status !== 'cancelado' && (isOpen || msgs.length > 0);
+        if(!msgs.length && !canWrite) return '';
+        const last = msgs[msgs.length-1];
+        const waiting = last && last.from === 'motoboy';
+        return `
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+            <div class="row-sub" style="margin-bottom:6px;">💬 Conversa com ${esc(o.motoboyName||'o motoboy')}${waiting ? ' <span class="badge" style="color:var(--warn);border-color:var(--warn);">motoboy respondeu</span>' : ''}</div>
+            <div class="chat-box" data-chat-box="${o.id}">${chatMessagesHtml(o)}</div>
+            ${canWrite ? `
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:flex-end;">
+              <textarea class="edit-input chat-input" data-chat-input="${o.id}" rows="2" maxlength="500" placeholder="Escreva para o motoboy…" style="flex:1;resize:vertical;">${esc(state.chatDrafts[o.id]||'')}</textarea>
+              <button class="btn-ghost btn-ok" data-chat-send="${o.id}">Enviar</button>
+            </div>` : ''}
+          </div>`;
+      };
       const ticketRow = (o, isOpen) => `
         <div class="row" style="flex-direction:column;align-items:stretch;${isOpen?'border-color:var(--orange, #ff6a3d);':''}">
           <div class="row-main">
             <strong>#${o.id.slice(-6).toUpperCase()}</strong>
             <span class="badge" style="background:#3a2a10;color:#ffb84d;">⚠️ ${esc(SUPPORT_REASON_LABELS[o.support.reason]||o.support.reason)}</span>
             <span class="badge">${STATUS_LABELS[o.status]||o.status}</span>
+            ${o.roundTrip
+              ? '<span class="badge" style="color:var(--lime);border-color:var(--lime);">🔁 Ida e volta</span>'
+              : '<span class="badge" style="color:var(--warn);border-color:var(--warn);">➡️ Só ida</span>'}
             <div class="row-sub">🏬 ${esc(o.businessName||'')} · 🏍️ ${esc(o.motoboyName||'sem motoboy no momento')}</div>
             <div class="row-sub">📍 ${esc(o.pickupAddress)} → 🏁 ${esc(o.deliveryAddress)}</div>
             ${o.support.note ? `<div class="row-sub">💬 "${esc(o.support.note)}"</div>` : ''}
             <div class="row-sub">Reportado em ${formatDateTime(o.support.reportedAt)}</div>
             ${!isOpen ? `<div class="row-sub">Resolvido em ${formatDateTime(o.support.resolvedAt)} · ação: ${o.support.resolvedAction==='encerrada'?'corrida encerrada':'motoboy mandado voltar ao comércio'}${o.support.resolvedNote?' · nota: "'+esc(o.support.resolvedNote)+'"':''}</div>` : ''}
           </div>
+          ${isOpen ? `<div class="hint-box">${rideKindHint(o)}</div>` : ''}
+          ${chatBox(o, isOpen)}
           ${(!isOpen && o.status==='entregue' && o.closedBy==='admin') ? `
           <div class="row-actions" style="margin-top:10px;">
             <button class="btn-ghost btn-ok" data-support-return="${o.id}">↩️ Reabrir e mandar voltar ao comércio</button>
@@ -1212,6 +1294,16 @@
       root.querySelectorAll('[data-support-return]').forEach(el=>{
         el.onclick = ()=>openSupportActionModal(el.getAttribute('data-support-return'), 'return');
       });
+      root.querySelectorAll('[data-chat-input]').forEach(el=>{
+        el.oninput = ()=>{ state.chatDrafts[el.getAttribute('data-chat-input')] = el.value; };
+        el.onkeydown = (e)=>{
+          if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendSupportChat(el.getAttribute('data-chat-input')); }
+        };
+      });
+      root.querySelectorAll('[data-chat-send]').forEach(el=>{
+        el.onclick = ()=>sendSupportChat(el.getAttribute('data-chat-send'));
+      });
+      root.querySelectorAll('.chat-box').forEach(box=>{ box.scrollTop = box.scrollHeight; });
       root.querySelectorAll('[data-general-ticket-resolve]').forEach(el=>{
         el.onclick = ()=>resolveGeneralTicket(el.getAttribute('data-general-ticket-resolve'));
       });

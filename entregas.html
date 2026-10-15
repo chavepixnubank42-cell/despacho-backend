@@ -455,6 +455,15 @@
     border:1px solid var(--orange,#FF6A3D); border-radius:8px; padding:8px 10px;
   }
 
+  .chat-messages{
+    max-height:46vh; overflow-y:auto; background:var(--surface-2); border:1px solid var(--border);
+    border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:8px; margin-bottom:12px;
+  }
+  .chat-msg{max-width:84%; padding:8px 11px; border-radius:10px; font-size:13.5px; line-height:1.4; white-space:pre-wrap; word-break:break-word;}
+  .chat-msg.is-support{align-self:flex-start; background:var(--surface); border:1px solid var(--border);}
+  .chat-msg.is-me{align-self:flex-end; background:rgba(198,255,61,0.14); border:1px solid rgba(198,255,61,0.4);}
+  .chat-meta{font-family:var(--font-mono); font-size:10px; color:var(--muted); margin-top:4px;}
+  .chat-empty{color:var(--muted); font-size:13px; text-align:center; padding:14px 6px;}
   .existing-list{display:flex;flex-direction:column;gap:8px;}
   .existing-item{
     display:flex;
@@ -1630,6 +1639,7 @@ document.addEventListener('wheel', function (e) {
     incomingAlert: null, // order object for the big banner shown to an online motoboy
     cancelModal: null, // {orderId, reason, note} while the cancel-reason sheet is open
     supportModal: null, // {orderId, reason, note} while the support sheet is open
+    supportChatModal: null, // {orderId} while the support chat sheet is open
     recentAddresses: [], // business only — past delivery addresses with already-confirmed pins
     rateModal: null, // {orderId, stars, comment} while the rating sheet is open
     myRatingSummary: null, // {average, count} for whoever is logged in
@@ -2984,6 +2994,77 @@ document.addEventListener('wheel', function (e) {
     showToast('✅ Suporte avisado — alguém vai te ajudar em breve');
   }
 
+  // ---------- chat com o suporte (dentro do chamado da corrida) ----------
+  function supportChatOrder(){
+    const sm = state.supportChatModal;
+    return sm ? (state.orders||[]).find(x=>x.id===sm.orderId) : null;
+  }
+  function supportChatMessagesHtml(o){
+    const msgs = (o && Array.isArray(o.supportChat)) ? o.supportChat : [];
+    if(!msgs.length) return '<div class="chat-empty">Nenhuma mensagem ainda. Escreva abaixo se precisar falar com o suporte.</div>';
+    return msgs.map(m => {
+      const hora = new Date(m.at).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
+      return `<div class="chat-msg ${m.from==='suporte'?'is-support':'is-me'}"><div>${esc(m.text)}</div><div class="chat-meta">${m.from==='suporte'?'Suporte':'Você'} · ${hora}</div></div>`;
+    }).join('');
+  }
+  // Atualiza só a lista de mensagens, sem refazer a tela (não derruba o teclado).
+  function updateSupportChatMessages(){
+    const box = root.querySelector('#support-chat-messages');
+    if(!box) return;
+    const nearBottom = (box.scrollHeight - box.scrollTop - box.clientHeight) < 60;
+    box.innerHTML = supportChatMessagesHtml(supportChatOrder());
+    if(nearBottom) box.scrollTop = box.scrollHeight;
+  }
+  function openSupportChat(orderId){
+    state.supportChatModal = {orderId};
+    render();
+  }
+  function closeSupportChat(){
+    state.supportChatModal = null;
+    render();
+  }
+  async function sendSupportChat(){
+    const sm = state.supportChatModal;
+    if(!sm) return;
+    const input = root.querySelector('#support-chat-input');
+    const text = ((input && input.value) || '').trim();
+    if(!text) return;
+    const btn = root.querySelector('#btn-support-chat-send');
+    if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+    const result = await apiPost('/api/orders/'+sm.orderId+'/support-chat', {text});
+    if(btn){ btn.disabled = false; btn.textContent = 'Enviar'; }
+    if(result.error){ showToast(result.error); return; }
+    if(input) input.value = '';
+    await refreshOrders();
+    updateSupportChatMessages();
+    const box = root.querySelector('#support-chat-messages');
+    if(box) box.scrollTop = box.scrollHeight;
+  }
+  function renderSupportChatModal(){
+    const o = supportChatOrder();
+    const backdrop = document.createElement('div');
+    backdrop.className='modal-backdrop';
+    backdrop.id='support-chat-backdrop';
+    backdrop.innerHTML = `
+      <div class="modal-sheet">
+        <div class="modal-head">
+          <span class="modal-title">💬 Conversa com o suporte</span>
+          <button class="modal-close" id="support-chat-close">✕</button>
+        </div>
+        <p class="page-sub" style="margin-bottom:12px;">${o ? 'Corrida #'+esc(o.id.slice(-6).toUpperCase())+' · ' : ''}As respostas do suporte aparecem aqui.</p>
+        <div class="chat-messages" id="support-chat-messages">${supportChatMessagesHtml(o)}</div>
+        <div class="field">
+          <textarea id="support-chat-input" maxlength="500" placeholder="Escreva sua mensagem para o suporte"></textarea>
+        </div>
+        <div class="ticket-actions">
+          <button class="btn-secondary" id="support-chat-close-2">Fechar</button>
+          <button class="btn-cancel-confirm" id="btn-support-chat-send">Enviar</button>
+        </div>
+      </div>
+    `;
+    return backdrop;
+  }
+
   function openRateModal(orderId){
     state.rateModal = {orderId, stars:0, comment:''};
     render();
@@ -3137,6 +3218,9 @@ document.addEventListener('wheel', function (e) {
     }
     if(state.supportModal){
       root.appendChild(renderSupportModal());
+    }
+    if(state.supportChatModal){
+      root.appendChild(renderSupportChatModal());
     }
     if(state.contactModal){
       root.appendChild(renderContactModal());
@@ -3996,9 +4080,13 @@ document.addEventListener('wheel', function (e) {
     // which only make sense before the package is picked up. This just
     // flags it for the support team; it doesn't resolve anything by itself.
     const contactBtn = `<button type="button" class="btn-secondary" style="margin-top:12px;" data-open-contact="${o.id}">📞 Contato com o comércio / emergência</button>` + renderContactLog(o);
+    const chatCount = Array.isArray(o.supportChat) ? o.supportChat.length : 0;
+    const chatBtn = (o.support || chatCount)
+      ? `<button type="button" class="btn-secondary" style="margin-top:10px;width:100%;" data-open-support-chat="${o.id}">💬 Conversar com o suporte${chatCount ? ' ('+chatCount+')' : ''}</button>`
+      : '';
     const supportLink = orderInfoBadges(o) + contactBtn + (o.support && o.support.status === 'aberto'
-      ? `<div class="support-flag">⚠️ Suporte avisado — aguardando retorno</div>`
-      : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>`);
+      ? `<div class="support-flag">⚠️ Suporte avisado — aguardando retorno</div>` + chatBtn
+      : `<div style="text-align:center;margin-top:10px;"><span class="link-muted" data-open-support="${o.id}">⚠️ Reportar problema / falar com suporte</span></div>` + chatBtn);
     if(o.status === 'aceito'){
       return `
         <div class="active-ride" id="active-ride-banner">
@@ -4900,6 +4988,20 @@ document.addEventListener('wheel', function (e) {
     const btnConfirmSupport = $('#btn-confirm-support');
     if(btnConfirmSupport) btnConfirmSupport.onclick = confirmSupport;
 
+    root.querySelectorAll('[data-open-support-chat]').forEach(elm=>{
+      elm.onclick = ()=>openSupportChat(elm.getAttribute('data-open-support-chat'));
+    });
+    const supportChatClose = $('#support-chat-close');
+    if(supportChatClose) supportChatClose.onclick = closeSupportChat;
+    const supportChatClose2 = $('#support-chat-close-2');
+    if(supportChatClose2) supportChatClose2.onclick = closeSupportChat;
+    const supportChatBackdrop = $('#support-chat-backdrop');
+    if(supportChatBackdrop) supportChatBackdrop.onclick = (e)=>{ if(e.target===supportChatBackdrop) closeSupportChat(); };
+    const btnSupportChatSend = $('#btn-support-chat-send');
+    if(btnSupportChatSend) btnSupportChatSend.onclick = sendSupportChat;
+    const supportChatMsgs = $('#support-chat-messages');
+    if(supportChatMsgs) supportChatMsgs.scrollTop = supportChatMsgs.scrollHeight;
+
     root.querySelectorAll('[data-open-rate]').forEach(elm=>{
       elm.onclick = ()=>openRateModal(elm.getAttribute('data-open-rate'));
     });
@@ -5058,7 +5160,7 @@ document.addEventListener('wheel', function (e) {
   // trocando de app e voltando) — this shared check keeps any of those
   // events from rebuilding the screen (and wiping whatever's being typed)
   // while a form, modal, or the profile screen is open.
-  const canSafelyRerender = () => !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.contactModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile');
+  const canSafelyRerender = () => !(state.modal || state.showTopup || state.cancelModal || state.supportModal || state.supportChatModal || state.contactModal || state.showSoundPicker || state.rateModal || state.showLocationPicker || state.screen==='profile');
 
   // Mobile browsers throttle background tabs — catch up the moment the
   // app becomes visible/foreground again instead of waiting for the next tick.
@@ -5188,6 +5290,14 @@ document.addEventListener('wheel', function (e) {
     );
   }
   setInterval(pingMotoboyLocationIfOnline, 20000);
+
+  // Com o chat do suporte aberto, busca respostas novas a cada 4s e atualiza
+  // só a lista de mensagens (a tela inteira não é refeita, então não atrapalha a digitação).
+  setInterval(async ()=>{
+    if(!state.supportChatModal || state.role !== 'motoboy') return;
+    await refreshOrders();
+    updateSupportChatMessages();
+  }, 4000);
   pingMotoboyLocationIfOnline(); // also fire once right away after load/login
 
   // ---------- keep the screen awake while online ----------

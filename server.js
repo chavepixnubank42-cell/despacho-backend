@@ -691,6 +691,56 @@ app.post('/api/admin/orders/:id/return-to-business', requireAuth('admin'), (req,
   res.json(o);
 });
 
+// ---------------------------------------------------------------
+// Chat do suporte dentro do chamado de uma corrida. As mensagens ficam na
+// própria corrida (o.supportChat), então o painel do admin e o app do
+// motoboy já recebem tudo junto com a corrida, sem endereço extra para ler.
+// ---------------------------------------------------------------
+const SUPPORT_CHAT_MAX_TEXT = 500;
+const SUPPORT_CHAT_MAX_MESSAGES = 200;
+
+function cleanChatText(v) {
+  return String(v == null ? '' : v).trim().slice(0, SUPPORT_CHAT_MAX_TEXT);
+}
+function appendSupportChat(o, from, text) {
+  if (!Array.isArray(o.supportChat)) o.supportChat = [];
+  o.supportChat.push({ from, text, at: Date.now() });
+  if (o.supportChat.length > SUPPORT_CHAT_MAX_MESSAGES) {
+    o.supportChat = o.supportChat.slice(-SUPPORT_CHAT_MAX_MESSAGES);
+  }
+}
+
+// Suporte (admin) -> motoboy
+app.post('/api/admin/orders/:id/support-chat', requireAuth('admin'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Não encontrado' });
+  if (!o.motoboyId) return res.status(409).json({ error: 'Essa corrida não está com um motoboy no momento.' });
+  const text = cleanChatText(req.body && req.body.text);
+  if (!text) return res.status(400).json({ error: 'Escreva a mensagem' });
+  appendSupportChat(o, 'suporte', text);
+  const title = '💬 Suporte — corrida #' + o.id.slice(-6).toUpperCase();
+  // aviso dentro do app + notificação (web e Firebase) — sem duplicar o push
+  pushNotice(db, 'motoboys', o.motoboyId, { title, body: text, promo: false, skipPush: true });
+  notifyMotoboy(o.motoboyId, { title, body: text, data: { type: 'support-chat', orderId: o.id } });
+  saveDB(db);
+  res.json(o);
+});
+
+// Motoboy -> suporte (só depois que existe um chamado nessa corrida)
+app.post('/api/orders/:id/support-chat', requireAuth('motoboy'), (req, res) => {
+  const db = loadDB();
+  const o = db.orders[req.params.id];
+  if (!o) return res.status(404).json({ error: 'Corrida não encontrada' });
+  if (o.motoboyId !== req.authId) return res.status(403).json({ error: 'Essa corrida não é sua' });
+  if (!o.support) return res.status(409).json({ error: 'Avise o suporte primeiro para abrir a conversa.' });
+  const text = cleanChatText(req.body && req.body.text);
+  if (!text) return res.status(400).json({ error: 'Escreva a mensagem' });
+  appendSupportChat(o, 'motoboy', text);
+  saveDB(db);
+  res.json(o);
+});
+
 app.get('/api/admin/summary', requireAuth('admin'), (req, res) => {
   const db = loadDB();
   const orders = Object.values(db.orders);
