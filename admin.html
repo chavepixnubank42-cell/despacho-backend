@@ -790,6 +790,11 @@
             <div class="row-sub">Reportado em ${formatDateTime(o.support.reportedAt)}</div>
             ${!isOpen ? `<div class="row-sub">Resolvido em ${formatDateTime(o.support.resolvedAt)} · ação: ${o.support.resolvedAction==='encerrada'?'corrida encerrada':'motoboy mandado voltar ao comércio'}${o.support.resolvedNote?' · nota: "'+esc(o.support.resolvedNote)+'"':''}</div>` : ''}
           </div>
+          ${(!isOpen && o.status==='entregue' && o.closedBy==='admin') ? `
+          <div class="row-actions" style="margin-top:10px;">
+            <button class="btn-ghost btn-ok" data-support-return="${o.id}">↩️ Reabrir e mandar voltar ao comércio</button>
+          </div>
+          ` : ''}
           ${isOpen ? `
           <div class="row-actions" style="margin-top:10px;">
             <button class="btn-ghost btn-danger" data-support-end="${o.id}">Encerrar corrida</button>
