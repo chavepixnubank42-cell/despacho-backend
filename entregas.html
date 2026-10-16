@@ -1000,6 +1000,31 @@
   @keyframes toast-in{from{opacity:0;transform:translate(-50%,8px);}to{opacity:1;transform:translate(-50%,0);}}
 
   /* Big incoming-order banner — visual fallback when sound is blocked */
+  /* Corrida nova: tela cheia separada do mapa (aceitar ou recusar) */
+  .incoming-screen{
+    position:fixed; inset:0; z-index:90; background:var(--bg);
+    display:flex; flex-direction:column; overflow-y:auto;
+    padding:calc(18px + env(safe-area-inset-top)) 18px calc(18px + env(safe-area-inset-bottom));
+    animation:sheet-in .2s ease;
+  }
+  .incoming-screen-bar{height:6px; border-radius:3px; margin-bottom:18px; flex-shrink:0; animation:alert-pulse 1s ease-in-out infinite;}
+  .incoming-screen-title{font-family:var(--font-display); font-size:22px; text-align:center; margin:0 0 6px;}
+  .incoming-screen-timer{text-align:center; font-family:var(--font-mono); font-size:13px; color:var(--muted); margin-bottom:16px;}
+  .incoming-screen-timer strong{color:var(--lime); font-size:22px;}
+  .incoming-screen-card{background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;}
+  .incoming-screen-value{font-family:var(--font-display); font-size:42px; color:var(--lime); text-align:center; line-height:1;}
+  .incoming-screen-biz{text-align:center; font-weight:600; font-size:15px;}
+  .incoming-screen-row{display:flex; flex-direction:column; gap:3px;}
+  .incoming-screen-label{font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted);}
+  .incoming-screen-addr{font-size:15px; line-height:1.35; word-break:break-word;}
+  .incoming-screen-tags{display:flex; flex-wrap:wrap; gap:6px; justify-content:center;}
+  .incoming-screen-tag{font-size:12px; background:var(--surface-2); border:1px solid var(--border); border-radius:20px; padding:4px 10px;}
+  .incoming-screen-actions{display:flex; gap:12px; margin-top:auto; padding-top:20px;}
+  .incoming-screen-actions button{padding:18px 12px; border-radius:12px; font-size:16px; cursor:pointer;}
+  .incoming-screen-decline{flex:1; background:none; border:1px solid var(--border); color:var(--text); font-family:var(--font-mono); text-transform:uppercase;}
+  .incoming-screen-accept{flex:1.5; background:var(--lime); color:#0E1210; border:none; font-family:var(--font-display);}
+  .incoming-screen-actions button:disabled{opacity:0.5; cursor:default;}
+
   .incoming-alert{
     position:fixed;
     top:0;left:0;right:0;
@@ -3197,9 +3222,6 @@ document.addEventListener('wheel', function (e) {
     }
 
     if(state.screen==='motoboy-dash' && state.incomingAlert){
-      const spacer = document.createElement('div');
-      spacer.style.height = '54px';
-      wrap.insertBefore(spacer, wrap.firstChild);
       root.appendChild(renderIncomingAlertBanner(state.incomingAlert));
     }
 
@@ -4304,19 +4326,51 @@ document.addEventListener('wheel', function (e) {
   }
 
   function renderIncomingAlertBanner(o){
+    // Tela cheia, separada do mapa: o motoboy só decide aceitar ou recusar.
     const wrap = document.createElement('div');
-    wrap.className = 'incoming-alert';
+    wrap.className = 'incoming-screen';
     wrap.id = 'incoming-alert';
+    const pays = { pix: '⚡ Pix', cash: '💵 Dinheiro', card: '💳 Cartão' };
+    const tags = [o.roundTrip ? '🔁 Ida e volta' : '➡️ Só ida'];
+    if(pays[o.paymentMethod]) tags.push(pays[o.paymentMethod]);
+    // Distâncias em linha reta (não é o trajeto de rua; serve de noção rápida).
+    const km = (m)=> (m/1000).toFixed(1).replace('.', ',') + ' km';
+    let toPickup = null, pickupToDelivery = null;
+    try{
+      if(typeof liveGeo !== 'undefined' && liveGeo && o.pickupCoords){
+        toPickup = haversineMeters(liveGeo.lat, liveGeo.lng, o.pickupCoords.lat, o.pickupCoords.lng);
+      }
+      if(o.pickupCoords && o.deliveryCoords){
+        pickupToDelivery = haversineMeters(o.pickupCoords.lat, o.pickupCoords.lng, o.deliveryCoords.lat, o.deliveryCoords.lng);
+      }
+    }catch(e){}
+    if(toPickup != null) tags.push('📍 ' + km(toPickup) + ' até a retirada');
+    if(pickupToDelivery != null) tags.push('🏁 ' + km(pickupToDelivery) + ' da retirada à entrega');
+    const hasTimer = !!o.offeredAt && o.offerQueue && o.offerQueue.length > 0 && o.offerIndex < o.offerQueue.length;
+    const remaining = hasTimer ? Math.max(0, Math.ceil((o.offeredAt + OFFER_TIMEOUT_MS - Date.now())/1000)) : null;
     wrap.innerHTML = `
-      <div class="incoming-alert-inner">
-        <div class="incoming-alert-text">
-          <span class="incoming-alert-title">🔔 NOVA CORRIDA</span>
-          <span class="incoming-alert-sub">${esc(o.businessName)} · ${formatMoney(o.value)}</span>
+      <div class="incoming-screen-bar"></div>
+      <h1 class="incoming-screen-title">🔔 NOVA CORRIDA</h1>
+      <div class="incoming-screen-timer">${hasTimer
+        ? `Responda em <strong id="incoming-countdown" data-offered-at="${o.offeredAt}">${remaining}</strong>s`
+        : 'Aceite ou recuse'}</div>
+      <div class="incoming-screen-card">
+        <div class="incoming-screen-biz">🏬 ${esc(o.businessName)}</div>
+        <div class="incoming-screen-value">${formatMoney(o.value)}</div>
+        <div class="incoming-screen-tags">${tags.map(t=>`<span class="incoming-screen-tag">${esc(t)}</span>`).join('')}</div>
+        <div class="incoming-screen-row">
+          <span class="incoming-screen-label">📦 Retirada</span>
+          <span class="incoming-screen-addr">${esc(o.pickupAddress)}</span>
         </div>
-        <div class="incoming-alert-actions">
-          <button class="btn-accept" id="incoming-alert-view">Ver corrida</button>
-          <button class="incoming-alert-dismiss" id="incoming-alert-dismiss">✕</button>
+        <div class="incoming-screen-row">
+          <span class="incoming-screen-label">🏁 Entrega</span>
+          <span class="incoming-screen-addr">${esc(o.deliveryAddress)}</span>
         </div>
+        ${o.note ? `<div class="incoming-screen-row"><span class="incoming-screen-label">✎ Observação</span><span class="incoming-screen-addr">${esc(o.note)}</span></div>` : ''}
+      </div>
+      <div class="incoming-screen-actions">
+        <button type="button" class="incoming-screen-decline" id="incoming-decline" data-order-id="${o.id}">Recusar</button>
+        <button type="button" class="incoming-screen-accept" id="incoming-accept" data-order-id="${o.id}">Aceitar</button>
       </div>
     `;
     return wrap;
@@ -4888,10 +4942,18 @@ document.addEventListener('wheel', function (e) {
     const btnPreviewSound = $('#btn-preview-sound');
     if(btnPreviewSound) btnPreviewSound.onclick = ()=>{ ensureAudio(); playAlertSound(); showToast('🔊 Tocando…'); };
 
-    const alertView = $('#incoming-alert-view');
-    if(alertView) alertView.onclick = ()=>setState({incomingAlert:null, motoboyTab:'disponiveis'});
-    const alertDismiss = $('#incoming-alert-dismiss');
-    if(alertDismiss) alertDismiss.onclick = ()=>setState({incomingAlert:null});
+    const incomingAccept = $('#incoming-accept');
+    if(incomingAccept) incomingAccept.onclick = ()=>{
+      incomingAccept.disabled = true;
+      const declineBtn = $('#incoming-decline'); if(declineBtn) declineBtn.disabled = true;
+      acceptOrder(incomingAccept.getAttribute('data-order-id'));
+    };
+    const incomingDecline = $('#incoming-decline');
+    if(incomingDecline) incomingDecline.onclick = ()=>{
+      incomingDecline.disabled = true;
+      const acceptBtn = $('#incoming-accept'); if(acceptBtn) acceptBtn.disabled = true;
+      declineOrder(incomingDecline.getAttribute('data-order-id'));
+    };
 
     const bannerClose = $('#banner-modal-close');
     if(bannerClose) bannerClose.onclick = (e)=>{ e.stopPropagation(); setState({activeBanner:null}); };
@@ -5052,6 +5114,22 @@ document.addEventListener('wheel', function (e) {
       const remaining = Math.max(0, Math.ceil((offeredAt + OFFER_TIMEOUT_MS - Date.now())/1000));
       oel.textContent = remaining + 's';
     });
+
+    // Tela cheia de corrida nova: mostra os segundos que faltam e, se o tempo
+    // acabar, fecha sozinha (o servidor já passou a corrida para o próximo motoboy).
+    const incomingCountdown = root.querySelector('#incoming-countdown');
+    if(incomingCountdown && state.incomingAlert){
+      const offeredAt = parseInt(incomingCountdown.getAttribute('data-offered-at'), 10);
+      if(offeredAt){
+        const remaining = Math.max(0, Math.ceil((offeredAt + OFFER_TIMEOUT_MS - Date.now())/1000));
+        incomingCountdown.textContent = remaining;
+        if(remaining <= 0){
+          state.incomingAlert = null;
+          render();
+          showToast('⏱️ Tempo esgotado — a corrida foi oferecida a outro motoboy');
+        }
+      }
+    }
 
     // Forced-pause countdown — shows the motoboy how long is left on the
     // automatic 10-minute pause applied after missing a pickup window.
