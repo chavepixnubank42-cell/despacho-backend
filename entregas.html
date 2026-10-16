@@ -1854,7 +1854,8 @@ document.addEventListener('wheel', function (e) {
       if(!canSafelyRerender()) return;
       await refreshOrders();
       await refreshProfile();
-      render();
+      // Só redesenha se algo mudou de verdade (ou passou 1 minuto): sem isso a tela piscava a cada 3s.
+      if(renderSignature() !== lastRenderSig || Date.now() - lastRenderAt >= FORCE_RENDER_MS) render();
     }, 3000);
   }
 
@@ -3122,7 +3123,26 @@ document.addEventListener('wheel', function (e) {
   }
 
   // ---------- render ----------
+  // ---------- evitar redesenho à toa (era isso que fazia a tela piscar) ----------
+  // A cada 3s o app busca os dados no servidor. Antes, ele apagava e refazia a
+  // tela toda MESMO quando nada tinha mudado. Agora ele guarda uma "assinatura"
+  // do que está na tela e só redesenha se ela mudar — ou a cada 60s, para os
+  // textos de tempo ("há 3 min") não ficarem velhos. Contagens regressivas,
+  // distância até o destino e o mapa já são atualizados no lugar, a cada 1s.
+  let lastRenderSig = '';
+  let lastRenderAt = 0;
+  const FORCE_RENDER_MS = 60 * 1000;
+  function renderSignature(){
+    try{
+      return JSON.stringify(state) + '|' + (liveGeo ? 1 : 0) + '|' + actionQueue.length;
+    }catch(e){
+      return 'x' + Date.now(); // não deu para comparar: trata como "mudou" e redesenha
+    }
+  }
+
   function render(){
+    lastRenderSig = renderSignature();
+    lastRenderAt = Date.now();
     const oldRegForm = root.querySelector('#form-register-motoboy');
     if(oldRegForm){ regDraft = {}; oldRegForm.querySelectorAll('[name]').forEach(i=>{ regDraft[i.name] = i.value; }); }
     root.innerHTML = '';
